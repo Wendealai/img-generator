@@ -1,0 +1,92 @@
+@import url('https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700;800&family=Noto+Serif+SC:wght@600;700&display=swap');
+
+:root {
+  font-family: 'Manrope', 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', sans-serif;
+  line-height: 1.5;
+  font-weight: 400;
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  color: #f1e6d4;
+  background:
+    radial-gradient(circle at 15% 10%, rgba(245, 169, 90, 0.12), transparent 34%),
+    radial-gradient(circle at 85% 0%, rgba(85, 187, 170, 0.15), transparent 38%),
+    linear-gradient(160deg, #0f141d 0%, #111923 52%, #171b26 100%);
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  min-height: 100vh;
+  color: inherit;
+  background: transparent;
+}
+
+#root {
+  min-height: 100vh;
+  padding: 20px;
+}
+
+.ant-card {
+  color: #eadfc8;
+}
+
+.ant-input,
+.ant-input-affix-wrapper,
+.ant-select-selector,
+.ant-input-number,
+.ant-input-number-input-wrap input,
+.ant-segmented,
+.ant-tabs-tab-btn {
+  background: rgba(8, 12, 19, 0.6) !important;
+  color: #f4e6ca !important;
+  border-color: rgba(246, 213, 167, 0.24) !important;
+}
+
+.ant-input::placeholder,
+.ant-input-number input::placeholder,
+.ant-input-textarea textarea::placeholder {
+  color: rgba(240, 220, 188, 0.5) !important;
+}
+
+.ant-segmented {
+  border-radius: 10px;
+}
+
+.ant-segmented-item-selected {
+  background: rgba(246, 178, 98, 0.32) !important;
+  color: #fff0d3 !important;
+}
+
+.ant-btn-primary {
+  background: linear-gradient(130deg, #c1693f 0%, #e6955f 100%) !important;
+  border-color: transparent !important;
+  box-shadow: none !important;
+}
+
+.ant-btn-primary:hover,
+.ant-btn-primary:focus {
+  background: linear-gradient(130deg, #d17547 0%, #ef9f67 100%) !important;
+}
+
+.ant-tabs-ink-bar {
+  background: #f1ab73 !important;
+}
+
+.ant-tabs-tab {
+  color: rgba(240, 221, 194, 0.72);
+}
+
+.ant-tabs-tab-active .ant-tabs-tab-btn {
+  color: #ffe8bf !important;
+}
+
+@media (max-width: 760px) {
+  #root {
+    padding: 12px;
+  }
+}
