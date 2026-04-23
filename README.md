@@ -59,6 +59,11 @@ npm run build
 npm run preview
 ```
 
+## Dokploy 部署
+
+- 仓库已包含 `Dockerfile` + `nginx.conf`，可直接选择 Dockerfile 构建部署。
+- 前端为 SPA 路由，Nginx 已内置 `try_files ... /index.html` 回退规则。
+
 ## 目录结构
 
 ```text
