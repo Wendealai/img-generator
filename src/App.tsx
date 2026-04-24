@@ -1085,6 +1085,9 @@ async function prepareRequest(
             content,
           },
         ],
+        tool_choice: {
+          type: 'image_generation',
+        },
         tools: [
           {
             type: 'image_generation',
@@ -1745,6 +1748,9 @@ function App() {
                 model: connection.model.trim() || 'gpt-5.4',
                 stream: true,
                 input: 'ping',
+                tool_choice: {
+                  type: 'image_generation',
+                },
                 tools: [
                   {
                     type: 'image_generation',
