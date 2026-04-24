@@ -16,6 +16,7 @@ import {
   Badge,
   Button,
   Card,
+  Collapse,
   Empty,
   Input,
   InputNumber,
@@ -1833,11 +1834,12 @@ function App() {
 
           <Text className="field-label">提示词</Text>
           <Input.TextArea
+            className="prompt-main-input"
             value={generation.prompt}
             onChange={(event) =>
               setGeneration((previous) => ({ ...previous, prompt: event.target.value }))
             }
-            autoSize={{ minRows: 4, maxRows: 10 }}
+            autoSize={{ minRows: 7, maxRows: 18 }}
             placeholder="描述画面主体、镜头、光影、材质和情绪..."
           />
 
@@ -1881,6 +1883,7 @@ function App() {
               <div className="batch-panel">
                 <Text className="field-label">提示词清单（每行一条）</Text>
                 <Input.TextArea
+                  className="prompt-list-input"
                   value={batchConfig.promptList}
                   onChange={(event) =>
                     setBatchConfig((previous) => ({
@@ -1888,7 +1891,7 @@ function App() {
                       promptList: event.target.value,
                     }))
                   }
-                  autoSize={{ minRows: 5, maxRows: 12 }}
+                  autoSize={{ minRows: 6, maxRows: 16 }}
                   placeholder={`示例：\n电影感人像，逆光，胶片质感\n高端产品海报，玻璃与金属材质\n国风庭院，晨雾，体积光`}
                 />
                 <Text type={batchQueuePreview.length > 0 ? 'secondary' : 'warning'}>
@@ -1931,11 +1934,12 @@ function App() {
         <div className="tab-content">
           <Text className="field-label">重绘提示词</Text>
           <Input.TextArea
+            className="prompt-main-input"
             value={generation.prompt}
             onChange={(event) =>
               setGeneration((previous) => ({ ...previous, prompt: event.target.value }))
             }
-            autoSize={{ minRows: 4, maxRows: 10 }}
+            autoSize={{ minRows: 6, maxRows: 16 }}
             placeholder="说明要保留哪些结构，要增强哪些细节..."
           />
 
@@ -2055,7 +2059,7 @@ function App() {
       <div className="layout-grid">
         <div className="left-column">
           <Card
-            className="studio-card"
+            className="studio-card compact-card"
             title={
               <Space>
                 <ApiOutlined />
@@ -2183,74 +2187,90 @@ function App() {
                 </div>
               ) : null}
 
-              <div className="field-block">
-                <Text className="field-label">模型探测路径</Text>
-                <Input
-                  value={connection.modelsPath}
-                  onChange={(event) =>
-                    setConnection((previous) => ({
-                      ...previous,
-                      modelsPath: event.target.value,
-                    }))
-                  }
-                  placeholder="/models"
-                />
-              </div>
+              <div className="field-block full-width advanced-settings">
+                <Collapse
+                  size="small"
+                  ghost
+                  items={[
+                    {
+                      key: 'advanced-routes',
+                      label: '高级路径与请求头',
+                      children: (
+                        <div className="field-grid advanced-grid">
+                          <div className="field-block">
+                            <Text className="field-label">模型探测路径</Text>
+                            <Input
+                              value={connection.modelsPath}
+                              onChange={(event) =>
+                                setConnection((previous) => ({
+                                  ...previous,
+                                  modelsPath: event.target.value,
+                                }))
+                              }
+                              placeholder="/models"
+                            />
+                          </div>
 
-              <div className="field-block">
-                <Text className="field-label">OpenAI 文生图路径</Text>
-                <Input
-                  value={connection.openaiTextPath}
-                  onChange={(event) =>
-                    setConnection((previous) => ({
-                      ...previous,
-                      openaiTextPath: event.target.value,
-                    }))
-                  }
-                  placeholder="/responses"
-                />
-              </div>
+                          <div className="field-block">
+                            <Text className="field-label">OpenAI 文生图路径</Text>
+                            <Input
+                              value={connection.openaiTextPath}
+                              onChange={(event) =>
+                                setConnection((previous) => ({
+                                  ...previous,
+                                  openaiTextPath: event.target.value,
+                                }))
+                              }
+                              placeholder="/responses"
+                            />
+                          </div>
 
-              <div className="field-block">
-                <Text className="field-label">OpenAI 图生图路径</Text>
-                <Input
-                  value={connection.openaiEditPath}
-                  onChange={(event) =>
-                    setConnection((previous) => ({
-                      ...previous,
-                      openaiEditPath: event.target.value,
-                    }))
-                  }
-                  placeholder="/responses"
-                />
-              </div>
+                          <div className="field-block">
+                            <Text className="field-label">OpenAI 图生图路径</Text>
+                            <Input
+                              value={connection.openaiEditPath}
+                              onChange={(event) =>
+                                setConnection((previous) => ({
+                                  ...previous,
+                                  openaiEditPath: event.target.value,
+                                }))
+                              }
+                              placeholder="/responses"
+                            />
+                          </div>
 
-              <div className="field-block">
-                <Text className="field-label">Gemini 路径模板</Text>
-                <Input
-                  value={connection.geminiPathTemplate}
-                  onChange={(event) =>
-                    setConnection((previous) => ({
-                      ...previous,
-                      geminiPathTemplate: event.target.value,
-                    }))
-                  }
-                  placeholder="/v1beta/models/{model}:generateContent"
-                />
-              </div>
+                          <div className="field-block">
+                            <Text className="field-label">Gemini 路径模板</Text>
+                            <Input
+                              value={connection.geminiPathTemplate}
+                              onChange={(event) =>
+                                setConnection((previous) => ({
+                                  ...previous,
+                                  geminiPathTemplate: event.target.value,
+                                }))
+                              }
+                              placeholder="/v1beta/models/{model}:generateContent"
+                            />
+                          </div>
 
-              <div className="field-block full-width">
-                <Text className="field-label">额外请求头（JSON 或每行 key:value）</Text>
-                <Input.TextArea
-                  value={connection.extraHeaders}
-                  onChange={(event) =>
-                    setConnection((previous) => ({
-                      ...previous,
-                      extraHeaders: event.target.value,
-                    }))
-                  }
-                  autoSize={{ minRows: 2, maxRows: 6 }}
-                  placeholder={`X-Project: image-lab\nX-Trace-Id: demo`}
+                          <div className="field-block full-width">
+                            <Text className="field-label">额外请求头（JSON 或每行 key:value）</Text>
+                            <Input.TextArea
+                              value={connection.extraHeaders}
+                              onChange={(event) =>
+                                setConnection((previous) => ({
+                                  ...previous,
+                                  extraHeaders: event.target.value,
+                                }))
+                              }
+                              autoSize={{ minRows: 2, maxRows: 6 }}
+                              placeholder={`X-Project: image-lab\nX-Trace-Id: demo`}
+                            />
+                          </div>
+                        </div>
+                      ),
+                    },
+                  ]}
                 />
               </div>
             </div>
@@ -2279,7 +2299,7 @@ function App() {
           </Card>
 
           <Card
-            className="studio-card"
+            className="studio-card compact-card prompt-card"
             title={
               <Space>
                 <SettingOutlined />
@@ -2446,7 +2466,7 @@ function App() {
 
         <div className="right-column">
           <Card
-            className="studio-card"
+            className="studio-card status-card"
             title={
               <Space>
                 <ThunderboltOutlined />
@@ -2492,7 +2512,7 @@ function App() {
           </Card>
 
           <Card
-            className="studio-card"
+            className="studio-card gallery-card"
             title={
               <Space>
                 <PictureOutlined />
@@ -2568,7 +2588,7 @@ function App() {
           </Card>
 
           <Card
-            className="studio-card"
+            className="studio-card output-card"
             title={
               <Space>
                 <SettingOutlined />
@@ -2583,10 +2603,10 @@ function App() {
                   label: '请求体',
                   children: (
                     <Input.TextArea
-                      className="mono-area"
+                      className="mono-area output-main-area"
                       value={requestPreview}
                       readOnly
-                      autoSize={{ minRows: 8, maxRows: 16 }}
+                      autoSize={{ minRows: 10, maxRows: 24 }}
                       placeholder="生成前会显示请求体预览"
                     />
                   ),
@@ -2596,10 +2616,10 @@ function App() {
                   label: '结果文本',
                   children: (
                     <Input.TextArea
-                      className="mono-area"
+                      className="mono-area output-main-area"
                       value={responseText}
                       readOnly
-                      autoSize={{ minRows: 8, maxRows: 16 }}
+                      autoSize={{ minRows: 10, maxRows: 24 }}
                       placeholder="模型文本响应会显示在这里"
                     />
                   ),
@@ -2609,10 +2629,10 @@ function App() {
                   label: '原始响应',
                   children: (
                     <Input.TextArea
-                      className="mono-area"
+                      className="mono-area output-main-area"
                       value={rawResponse}
                       readOnly
-                      autoSize={{ minRows: 8, maxRows: 16 }}
+                      autoSize={{ minRows: 10, maxRows: 24 }}
                       placeholder="原始 JSON / 文本响应"
                     />
                   ),

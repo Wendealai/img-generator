@@ -175,15 +175,15 @@
 
 .layout-grid {
   display: grid;
-  grid-template-columns: minmax(420px, 0.94fr) minmax(460px, 1.06fr);
-  gap: 16px;
+  grid-template-columns: minmax(320px, 0.72fr) minmax(560px, 1.28fr);
+  gap: 14px;
 }
 
 .left-column,
 .right-column {
   display: flex;
   flex-direction: column;
-  gap: 16px;
+  gap: 12px;
 }
 
 .left-column .studio-card:nth-child(1) {
@@ -218,6 +218,50 @@
 .studio-card .ant-card-head-title,
 .studio-card .ant-card-extra {
   color: #f4e7ce;
+}
+
+.compact-card .ant-card-body {
+  padding: 14px 14px 12px;
+}
+
+.compact-card .field-grid {
+  gap: 10px;
+}
+
+.compact-card .field-block {
+  gap: 4px;
+}
+
+.compact-card .field-label {
+  font-size: 11px;
+  letter-spacing: 0.04em;
+}
+
+.compact-card .actions-row {
+  margin-top: 12px;
+  padding: 8px;
+}
+
+.advanced-settings {
+  margin-top: 2px;
+}
+
+.advanced-settings .ant-collapse-item {
+  border: 1px solid rgba(245, 212, 165, 0.22) !important;
+  border-radius: 10px !important;
+  background: rgba(7, 13, 21, 0.46);
+}
+
+.advanced-settings .ant-collapse-header {
+  padding: 8px 10px !important;
+}
+
+.advanced-settings .ant-collapse-content-box {
+  padding: 8px 2px 2px !important;
+}
+
+.advanced-grid {
+  margin-top: 6px;
 }
 
 .field-grid {
@@ -266,6 +310,14 @@
   display: flex;
   flex-direction: column;
   gap: 10px;
+}
+
+.prompt-main-input textarea.ant-input {
+  min-height: 180px;
+}
+
+.prompt-list-input textarea.ant-input {
+  min-height: 190px;
 }
 
 .batch-control {
@@ -373,6 +425,22 @@
   flex-direction: column;
   gap: 10px;
   margin-top: 14px;
+}
+
+.status-card {
+  order: 2;
+}
+
+.gallery-card {
+  order: 1;
+}
+
+.gallery-card .ant-card-body {
+  min-height: 52vh;
+}
+
+.output-card {
+  order: 3;
 }
 
 .status-meta .ant-typography {
@@ -500,6 +568,10 @@
   line-height: 1.52;
 }
 
+.output-main-area textarea.ant-input {
+  min-height: 220px;
+}
+
 .model-input-box {
   padding: 8px;
   border-top: 1px solid rgba(0, 0, 0, 0.08);
@@ -539,6 +611,10 @@
 
   .hero-card {
     grid-template-columns: 1fr;
+  }
+
+  .gallery-card .ant-card-body {
+    min-height: 420px;
   }
 }
 
