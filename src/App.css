@@ -604,6 +604,29 @@
   background: rgba(247, 253, 255, 0.82);
 }
 
+.prompt-helper-card .ant-card-body {
+  padding-top: 12px;
+}
+
+.prompt-helper-frame-wrap {
+  border-radius: 14px;
+  border: 1px solid rgba(132, 177, 208, 0.5);
+  background: rgba(255, 255, 255, 0.9);
+  overflow: hidden;
+}
+
+.prompt-helper-frame {
+  display: block;
+  width: 100%;
+  min-height: 620px;
+  border: 0;
+  background: #ffffff;
+}
+
+.prompt-helper-card .ant-typography {
+  margin-top: 10px;
+}
+
 .ant-empty-description {
   color: #56718d !important;
 }
@@ -693,5 +716,9 @@
 
   .hero-card {
     padding: 18px;
+  }
+
+  .prompt-helper-frame {
+    min-height: 520px;
   }
 }

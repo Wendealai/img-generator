@@ -125,7 +125,7 @@ const BATCH_KEY = 'aurora-image-studio.batch.v1'
 
 const OPENAI_MODELS = ['gpt-5.4', 'gpt-5.2', 'gpt-5.4-mini']
 const GEMINI_MODELS = ['nanobanana2']
-const RESOLUTION_OPTIONS = ['1024x1024', '1536x1024', '1024x1536', '2048x2048']
+const RESOLUTION_OPTIONS = ['1024x1024', '1536x1024', '1024x1536', '2048x2048', '4096x4096']
 const ASPECT_RATIO_OPTIONS = ['auto', '1:1', '4:3', '3:2', '16:9', '9:16']
 const STYLE_OPTIONS = [
   'auto',
@@ -172,6 +172,7 @@ const PROMPT_PRESETS = [
       '雨夜赛博城市街道，霓虹招牌反射，动态人群，体积光，广角镜头，视觉冲击力强。',
   },
 ]
+const PROMPT_GUIDE_URL = 'https://youmind.com/zh-CN/gpt-image-2-prompts'
 const IMAGE_MODEL_FALLBACK_MODELS = ['nanobanana2']
 const OPENAI_IMAGE_TOOL_MODEL = 'gpt-image-2'
 const MODEL_UNAVAILABLE_PATTERN =
@@ -2796,6 +2797,39 @@ function App() {
                 ))}
               </div>
             )}
+          </Card>
+
+          <Card
+            className="studio-card prompt-helper-card"
+            title={
+              <Space>
+                <ApiOutlined />
+                Prompt 参考站
+              </Space>
+            }
+            extra={
+              <Button
+                type="link"
+                href={PROMPT_GUIDE_URL}
+                target="_blank"
+                rel="noreferrer"
+              >
+                新窗口打开
+              </Button>
+            }
+          >
+            <div className="prompt-helper-frame-wrap">
+              <iframe
+                className="prompt-helper-frame"
+                src={PROMPT_GUIDE_URL}
+                title="GPT-Image-2 Prompt Guide"
+                loading="lazy"
+                referrerPolicy="no-referrer-when-downgrade"
+              />
+            </div>
+            <Paragraph type="secondary">
+              如果内嵌区域为空，说明目标站点限制了 iframe，可点击右上角「新窗口打开」。
+            </Paragraph>
           </Card>
         </div>
       </div>
