@@ -91,6 +91,7 @@ interface HistoryRecord {
   statusCode?: number
   latencyMs?: number
   images: StudioImage[]
+  imageCount: number
   note: string
   responseSnippet: string
 }
@@ -411,6 +412,7 @@ function readStoredHistory(): HistoryRecord[] {
           statusCode: typeof item.statusCode === 'number' ? item.statusCode : undefined,
           latencyMs: typeof item.latencyMs === 'number' ? item.latencyMs : undefined,
           images,
+          imageCount: typeof item.imageCount === 'number' ? item.imageCount : images.length,
           note: typeof item.note === 'string' ? item.note : '',
           responseSnippet:
             typeof item.responseSnippet === 'string' ? item.responseSnippet : '',
@@ -419,6 +421,29 @@ function readStoredHistory(): HistoryRecord[] {
   } catch {
     return []
   }
+}
+
+function safeLocalStorageSet(key: string, value: string): void {
+  try {
+    localStorage.setItem(key, value)
+  } catch {
+    // Ignore storage write failures (for example QuotaExceededError) to avoid runtime crashes.
+  }
+}
+
+function sanitizeHistoryForStorage(records: HistoryRecord[]): HistoryRecord[] {
+  return records.slice(0, 40).map((item) => ({
+    ...item,
+    images: item.images
+      .filter((image) => typeof image.src === 'string' && !image.src.startsWith('data:image/'))
+      .slice(0, 8),
+    note: item.note.slice(0, 1200),
+    responseSnippet: item.responseSnippet.slice(0, 1600),
+  }))
+}
+
+function getHistoryImages(images: StudioImage[]): StudioImage[] {
+  return images.filter((image) => typeof image.src === 'string' && !image.src.startsWith('data:image/'))
 }
 
 function parseExtraHeaders(extraHeaders: string): Record<string, string> {
@@ -1390,19 +1415,19 @@ function App() {
   const [messageApi, contextHolder] = message.useMessage()
 
   useEffect(() => {
-    localStorage.setItem(CONNECTION_KEY, JSON.stringify(connection))
+    safeLocalStorageSet(CONNECTION_KEY, JSON.stringify(connection))
   }, [connection])
 
   useEffect(() => {
-    localStorage.setItem(GENERATION_KEY, JSON.stringify(generation))
+    safeLocalStorageSet(GENERATION_KEY, JSON.stringify(generation))
   }, [generation])
 
   useEffect(() => {
-    localStorage.setItem(BATCH_KEY, JSON.stringify(batchConfig))
+    safeLocalStorageSet(BATCH_KEY, JSON.stringify(batchConfig))
   }, [batchConfig])
 
   useEffect(() => {
-    localStorage.setItem(HISTORY_KEY, JSON.stringify(history.slice(0, 40)))
+    safeLocalStorageSet(HISTORY_KEY, JSON.stringify(sanitizeHistoryForStorage(history)))
   }, [history])
 
   useEffect(() => {
@@ -1680,8 +1705,9 @@ function App() {
             status: 'success',
             statusCode: response.status,
             latencyMs: lastAttemptLatencyMs,
-            images: nextImages,
-            note: outputText || '模型返回图像成功',
+            images: getHistoryImages(nextImages),
+            imageCount: nextImages.length,
+            note: outputText || `模型返回图像成功（共 ${nextImages.length} 张）`,
             responseSnippet: raw.slice(0, 1600),
           })
 
@@ -1751,6 +1777,7 @@ function App() {
         endpoint: attemptedEndpoint,
         status: 'error',
         images: [],
+        imageCount: 0,
         note: readableMessage,
         responseSnippet: readableMessage.slice(0, 1600),
       })
@@ -2866,7 +2893,7 @@ function App() {
                           <Text type="secondary">{item.latencyMs}ms</Text>
                         ) : null}
                         <Text type="secondary">
-                          {item.images.length > 0 ? `${item.images.length} 张图` : '无图像'}
+                          {item.imageCount > 0 ? `${item.imageCount} 张图` : '无图像'}
                         </Text>
                       </Space>
                     </div>
