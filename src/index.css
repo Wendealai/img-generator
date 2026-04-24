@@ -1,18 +1,18 @@
-@import url('https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700;800&family=Noto+Serif+SC:wght@600;700&display=swap');
+@import url('https://fonts.googleapis.com/css2?family=Sora:wght@400;500;600;700;800&family=Noto+Sans+SC:wght@400;500;700;800&family=Noto+Serif+SC:wght@600;700&family=IBM+Plex+Mono:wght@400;500&display=swap');
 
 :root {
-  font-family: 'Manrope', 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', sans-serif;
+  font-family: 'Sora', 'Noto Sans SC', 'PingFang SC', 'Microsoft YaHei', sans-serif;
   line-height: 1.5;
   font-weight: 400;
   font-synthesis: none;
   text-rendering: optimizeLegibility;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
-  color: #f1e6d4;
+  color: #0f2940;
   background:
-    radial-gradient(circle at 15% 10%, rgba(245, 169, 90, 0.12), transparent 34%),
-    radial-gradient(circle at 85% 0%, rgba(85, 187, 170, 0.15), transparent 38%),
-    linear-gradient(160deg, #0f141d 0%, #111923 52%, #171b26 100%);
+    radial-gradient(circle at 12% 12%, rgba(80, 193, 183, 0.24), transparent 32%),
+    radial-gradient(circle at 88% 6%, rgba(124, 180, 255, 0.24), transparent 36%),
+    linear-gradient(155deg, #eef9ff 0%, #f4fbff 48%, #f7f9ff 100%);
 }
 
 * {
@@ -28,11 +28,11 @@ body {
 
 #root {
   min-height: 100vh;
-  padding: 20px;
+  padding: clamp(12px, 2.2vw, 24px);
 }
 
 .ant-card {
-  color: #eadfc8;
+  color: #15324f;
 }
 
 .ant-input,
@@ -42,51 +42,81 @@ body {
 .ant-input-number-input-wrap input,
 .ant-segmented,
 .ant-tabs-tab-btn {
-  background: rgba(8, 12, 19, 0.6) !important;
-  color: #f4e6ca !important;
-  border-color: rgba(246, 213, 167, 0.24) !important;
+  background: #ffffff !important;
+  color: #16324f !important;
+  border-color: #bfd2e3 !important;
 }
 
 .ant-input::placeholder,
 .ant-input-number input::placeholder,
 .ant-input-textarea textarea::placeholder {
-  color: rgba(240, 220, 188, 0.5) !important;
+  color: #6d8398 !important;
+}
+
+.ant-input:hover,
+.ant-input:focus,
+.ant-input-affix-wrapper-focused,
+.ant-input-affix-wrapper:focus,
+.ant-select-focused .ant-select-selector,
+.ant-select-selector:hover,
+.ant-input-number:focus,
+.ant-input-number:hover {
+  border-color: #2ea9a0 !important;
+  box-shadow: 0 0 0 2px rgba(46, 169, 160, 0.14) !important;
 }
 
 .ant-segmented {
-  border-radius: 10px;
+  border-radius: 12px;
 }
 
 .ant-segmented-item-selected {
-  background: rgba(246, 178, 98, 0.32) !important;
-  color: #fff0d3 !important;
+  background: linear-gradient(120deg, #dbf7f4 0%, #c6f0ec 100%) !important;
+  color: #0f645e !important;
+  font-weight: 600;
 }
 
 .ant-btn-primary {
-  background: linear-gradient(130deg, #c1693f 0%, #e6955f 100%) !important;
+  background: linear-gradient(122deg, #0f8b82 0%, #28b9ae 100%) !important;
   border-color: transparent !important;
-  box-shadow: none !important;
+  box-shadow: 0 8px 20px rgba(16, 136, 127, 0.26) !important;
 }
 
 .ant-btn-primary:hover,
 .ant-btn-primary:focus {
-  background: linear-gradient(130deg, #d17547 0%, #ef9f67 100%) !important;
+  background: linear-gradient(122deg, #0f9a90 0%, #30c3b7 100%) !important;
+}
+
+.ant-btn-default {
+  color: #21425e;
+  border-color: #b9ccdc;
+  background: #ffffff;
+}
+
+.ant-btn-default:hover,
+.ant-btn-default:focus {
+  color: #12736c;
+  border-color: #42b8ae;
 }
 
 .ant-tabs-ink-bar {
-  background: #f1ab73 !important;
+  background: #12958b !important;
 }
 
 .ant-tabs-tab {
-  color: rgba(240, 221, 194, 0.72);
+  color: #5e7288;
 }
 
 .ant-tabs-tab-active .ant-tabs-tab-btn {
-  color: #ffe8bf !important;
+  color: #11405f !important;
+  font-weight: 600;
+}
+
+.ant-tag {
+  border-radius: 999px;
 }
 
 @media (max-width: 760px) {
   #root {
-    padding: 12px;
+    padding: 10px;
   }
 }
