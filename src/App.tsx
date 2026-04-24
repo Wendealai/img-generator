@@ -177,11 +177,9 @@ const OPENAI_IMAGE_TOOL_MODEL = 'gpt-image-2'
 const MODEL_UNAVAILABLE_PATTERN =
   /(全部渠道不可提供当前模型|当前模型不可用|model unavailable|not available|no channel|unsupported model)/i
 
-const DEV_ASXS_PROXY_BASE_URL = '/api-asxs/v1'
+const ASXS_PROXY_BASE_URL = '/api-asxs/v1'
 const DIRECT_ASXS_BASE_URL = 'https://api.asxs.top/v1'
-const DEFAULT_OPENAI_BASE_URL = import.meta.env.DEV
-  ? DEV_ASXS_PROXY_BASE_URL
-  : DIRECT_ASXS_BASE_URL
+const DEFAULT_OPENAI_BASE_URL = ASXS_PROXY_BASE_URL
 
 const DEFAULT_CONNECTION: ConnectionConfig = {
   provider: 'openai',
@@ -229,7 +227,7 @@ function isAsxsHostUrl(value: string): boolean {
 
 function resolveRuntimeBaseUrl(baseUrl: string): string {
   const trimmed = baseUrl.trim()
-  if (!trimmed || !import.meta.env.DEV) {
+  if (!trimmed) {
     return trimmed
   }
   if (trimmed.startsWith('/api-asxs')) {
@@ -239,7 +237,7 @@ function resolveRuntimeBaseUrl(baseUrl: string): string {
   if (asxsMatch) {
     const suffix = asxsMatch[1] ?? ''
     if (!suffix || suffix === '/' || suffix === '/v1') {
-      return DEV_ASXS_PROXY_BASE_URL
+      return ASXS_PROXY_BASE_URL
     }
     if (suffix.startsWith('/v1/')) {
       return `/api-asxs${suffix}`
@@ -287,7 +285,6 @@ function normalizeConnectionDefaults(connection: ConnectionConfig): ConnectionCo
   }
 
   const shouldSwitchToProxyForLegacyResponses =
-    import.meta.env.DEV &&
     connection.provider === 'openai' &&
     isAsxsHostUrl(normalizedBase) &&
     (normalizedModelsPath === '/v1/responses' ||
@@ -306,7 +303,7 @@ function normalizeConnectionDefaults(connection: ConnectionConfig): ConnectionCo
     }
   }
 
-  if (import.meta.env.DEV && connection.provider === 'openai' && isAsxsHostUrl(normalizedBase)) {
+  if (connection.provider === 'openai' && isAsxsHostUrl(normalizedBase)) {
     return {
       ...connection,
       baseUrl: resolveRuntimeBaseUrl(normalizedBase),
@@ -2212,7 +2209,7 @@ function App() {
                       baseUrl: event.target.value,
                     }))
                   }
-                  placeholder={import.meta.env.DEV ? '/api-asxs/v1 (开发代理)' : 'https://api.asxs.top/v1'}
+                  placeholder="/api-asxs/v1 (推荐，同域代理)"
                 />
               </div>
 
