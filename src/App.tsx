@@ -521,11 +521,24 @@ interface StreamParseResult {
   images: StudioImage[]
   outputText: string
   raw: string
+  eventTypes: string[]
+  hasOutputItemDone: boolean
 }
 
 function getNestedRecord(source: Record<string, unknown>, key: string): Record<string, unknown> | null {
   const value = source[key]
   return isRecord(value) ? value : null
+}
+
+function parseJsonLikeString(value: unknown): unknown {
+  if (typeof value !== 'string') {
+    return value
+  }
+  const trimmed = value.trim()
+  if (!trimmed || (!trimmed.startsWith('{') && !trimmed.startsWith('['))) {
+    return value
+  }
+  return safeJsonParse(trimmed)
 }
 
 function extractImagesFromOutputItemDoneEvent(eventType: string, payload: unknown): StudioImage[] {
@@ -534,31 +547,41 @@ function extractImagesFromOutputItemDoneEvent(eventType: string, payload: unknow
     return []
   }
 
-  const payloadType = typeof payload.type === 'string' ? payload.type : ''
-  if (normalizedEventType !== 'response.output_item.done' && payloadType !== 'response.output_item.done') {
+  const payloadType =
+    typeof payload.type === 'string'
+      ? payload.type.trim()
+      : typeof payload.event === 'string'
+        ? payload.event.trim()
+        : ''
+  const isOutputItemDoneEvent =
+    normalizedEventType === 'response.output_item.done' || payloadType === 'response.output_item.done'
+  if (!isOutputItemDoneEvent) {
     return []
   }
 
   const candidateNodes: unknown[] = [payload]
-  const directItem = getNestedRecord(payload, 'item')
-  if (directItem) {
-    candidateNodes.push(directItem)
+  const pushObjectCandidate = (candidate: unknown) => {
+    const parsedCandidate = parseJsonLikeString(candidate)
+    if (isRecord(parsedCandidate)) {
+      candidateNodes.push(parsedCandidate)
+    }
   }
-  const outputItem = getNestedRecord(payload, 'output_item')
-  if (outputItem) {
-    candidateNodes.push(outputItem)
+
+  const directItem = payload.item
+  pushObjectCandidate(directItem)
+  const outputItem = payload.output_item
+  pushObjectCandidate(outputItem)
+  const rawDataNode = payload.data
+  pushObjectCandidate(rawDataNode)
+  if (isRecord(rawDataNode)) {
+    pushObjectCandidate(rawDataNode.item)
+    pushObjectCandidate(rawDataNode.output_item)
   }
+
   const nestedData = getNestedRecord(payload, 'data')
   if (nestedData) {
-    candidateNodes.push(nestedData)
-    const nestedItem = getNestedRecord(nestedData, 'item')
-    if (nestedItem) {
-      candidateNodes.push(nestedItem)
-    }
-    const nestedOutputItem = getNestedRecord(nestedData, 'output_item')
-    if (nestedOutputItem) {
-      candidateNodes.push(nestedOutputItem)
-    }
+    pushObjectCandidate(nestedData.item)
+    pushObjectCandidate(nestedData.output_item)
   }
 
   return extractImages(candidateNodes)
@@ -575,6 +598,8 @@ async function parseResponseSseStream(response: Response): Promise<StreamParseRe
   const parsedEvents: unknown[] = []
   const textFragments: string[] = []
   const imagesBySrc = new Map<string, StudioImage>()
+  const eventTypes = new Set<string>()
+  let hasOutputItemDone = false
   let buffer = ''
   let fullText = ''
 
@@ -594,17 +619,18 @@ async function parseResponseSseStream(response: Response): Promise<StreamParseRe
     }
 
     rawBlocks.push(trimmedBlock)
-    const lines = trimmedBlock.split(/\r?\n/)
+    const lines = trimmedBlock.split('\n')
     let eventType = ''
     const dataLines: string[] = []
 
     for (const line of lines) {
-      if (line.startsWith('event:')) {
-        eventType = line.slice(6).trim()
+      const normalizedLine = line.trimStart()
+      if (normalizedLine.startsWith('event:')) {
+        eventType = normalizedLine.slice(6).trim()
         continue
       }
-      if (line.startsWith('data:')) {
-        dataLines.push(line.slice(5).trimStart())
+      if (normalizedLine.startsWith('data:')) {
+        dataLines.push(normalizedLine.slice(5).trimStart())
       }
     }
 
@@ -619,10 +645,35 @@ async function parseResponseSseStream(response: Response): Promise<StreamParseRe
 
     const payload = safeJsonParse(dataText)
     parsedEvents.push(payload)
+    if (eventType) {
+      eventTypes.add(eventType)
+      if (eventType === 'response.output_item.done') {
+        hasOutputItemDone = true
+      }
+    }
 
     if (typeof payload === 'string') {
       textFragments.push(payload)
       return
+    }
+
+    if (isRecord(payload)) {
+      const payloadType = typeof payload.type === 'string' ? payload.type.trim() : ''
+      const payloadEvent = typeof payload.event === 'string' ? payload.event.trim() : ''
+      const nestedData = parseJsonLikeString(payload.data)
+      const nestedType = isRecord(nestedData) && typeof nestedData.type === 'string' ? nestedData.type.trim() : ''
+      const nestedEvent =
+        isRecord(nestedData) && typeof nestedData.event === 'string' ? nestedData.event.trim() : ''
+
+      for (const candidate of [payloadType, payloadEvent, nestedType, nestedEvent]) {
+        if (!candidate) {
+          continue
+        }
+        eventTypes.add(candidate)
+        if (candidate === 'response.output_item.done') {
+          hasOutputItemDone = true
+        }
+      }
     }
 
     addImages(extractImagesFromOutputItemDoneEvent(eventType, payload))
@@ -646,8 +697,9 @@ async function parseResponseSseStream(response: Response): Promise<StreamParseRe
   while (true) {
     const { value, done } = await reader.read()
     const chunkText = decoder.decode(value ?? new Uint8Array(), { stream: !done })
-    fullText += chunkText
-    buffer += chunkText
+    const normalizedChunk = chunkText.replace(/\r\n/g, '\n').replace(/\r/g, '\n')
+    fullText += normalizedChunk
+    buffer += normalizedChunk
 
     let markerIndex = buffer.indexOf('\n\n')
     while (markerIndex >= 0) {
@@ -684,6 +736,8 @@ async function parseResponseSseStream(response: Response): Promise<StreamParseRe
     images: Array.from(imagesBySrc.values()),
     outputText,
     raw,
+    eventTypes: Array.from(eventTypes.values()),
+    hasOutputItemDone,
   }
 }
 
@@ -1466,12 +1520,16 @@ function App() {
           let nextImages: StudioImage[] = []
           let outputText = ''
           let raw = ''
+          let streamEventTypes: string[] = []
+          let streamHasOutputItemDone = false
 
           if (request.expectsSse) {
             const streamResult = await parseResponseSseStream(response)
             nextImages = streamResult.images
             outputText = streamResult.outputText
             raw = streamResult.raw
+            streamEventTypes = streamResult.eventTypes
+            streamHasOutputItemDone = streamResult.hasOutputItemDone
             setRawResponse(raw || 'SSE 流式响应已消费，但无可展示原文。')
           } else {
             raw = await response.text()
@@ -1484,8 +1542,18 @@ function App() {
           }
 
           if (nextImages.length === 0) {
-            taskFailureMessage =
-              '接口返回成功，但未识别到图片数据。请检查 SSE 事件中是否包含 response.output_item.done。'
+            if (request.expectsSse) {
+              const recentEventTypes =
+                streamEventTypes.length > 0
+                  ? streamEventTypes.slice(0, 10).join(', ')
+                  : '未解析到事件类型'
+              taskFailureMessage = streamHasOutputItemDone
+                ? `接口返回成功，检测到 response.output_item.done，但事件中未提取到可用图片数据（item.result 可能为空）。事件类型：${recentEventTypes}`
+                : `接口返回成功，但未检测到 response.output_item.done。事件类型：${recentEventTypes}`
+            } else {
+              taskFailureMessage =
+                '接口返回成功，但未识别到图片数据。请检查 SSE 事件中是否包含 response.output_item.done。'
+            }
             break
           }
 
