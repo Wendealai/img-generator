@@ -2818,18 +2818,39 @@ function App() {
               </Button>
             }
           >
-            <div className="prompt-helper-frame-wrap">
-              <iframe
-                className="prompt-helper-frame"
-                src={PROMPT_GUIDE_URL}
-                title="GPT-Image-2 Prompt Guide"
-                loading="lazy"
-                referrerPolicy="no-referrer-when-downgrade"
-              />
+            <Alert
+              type="info"
+              showIcon
+              message="目标站点启用了防嵌入策略（X-Frame-Options: DENY / frame-ancestors none），无法在页面内 iframe 展示。"
+            />
+            <div className="prompt-helper-actions">
+              <Button type="primary" href={PROMPT_GUIDE_URL} target="_blank" rel="noreferrer">
+                打开 Prompt 参考站
+              </Button>
+              <Button
+                onClick={() => {
+                  void navigator.clipboard
+                    .writeText(PROMPT_GUIDE_URL)
+                    .then(() => messageApi.success('参考链接已复制'))
+                    .catch(() => messageApi.error('复制失败，请手动复制链接'))
+                }}
+              >
+                复制链接
+              </Button>
             </div>
-            <Paragraph type="secondary">
-              如果内嵌区域为空，说明目标站点限制了 iframe，可点击右上角「新窗口打开」。
-            </Paragraph>
+            <div className="prompt-helper-cheatsheet">
+              <Text strong>内置速查（GPT-Image-2）</Text>
+              <ul>
+                <li>主体：先写“谁/什么”，再写动作与情绪。</li>
+                <li>镜头：焦段、机位、构图（例如 85mm, close-up）。</li>
+                <li>光照：主光方向、氛围光、对比度。</li>
+                <li>材质：皮肤、金属、玻璃、布料等细节关键词。</li>
+                <li>环境：时间、天气、场景元素、空间层次。</li>
+                <li>风格：摄影、插画、电影感、海报感，尽量单一清晰。</li>
+                <li>负向：在“负向提示词”里写要避免的缺陷与元素。</li>
+                <li>迭代：固定 seed 后只改 1-2 个变量，便于抽卡对比。</li>
+              </ul>
+            </div>
           </Card>
         </div>
       </div>
