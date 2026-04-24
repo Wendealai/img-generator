@@ -928,6 +928,12 @@ function extractError(payload: unknown, status: number): string {
   return `HTTP ${status}: 请求失败`
 }
 
+function isLikelyFetchNetworkError(message: string): boolean {
+  return /networkerror|failed to fetch|load failed|network request failed|fetch resource/i.test(
+    message,
+  )
+}
+
 function composePrompt(
   config: GenerationConfig,
   mode: StudioMode,
@@ -1634,7 +1640,12 @@ function App() {
       const failureMessage =
         error instanceof Error ? error.message : '生成失败，请检查配置后重试'
       const isAbortError = error instanceof DOMException && error.name === 'AbortError'
-      const readableMessage = isAbortError ? '任务已取消' : failureMessage
+      const isNetworkError = !isAbortError && isLikelyFetchNetworkError(failureMessage)
+      const readableMessage = isAbortError
+        ? '任务已取消'
+        : isNetworkError
+          ? `网络请求失败：${attemptedEndpoint || '未知 endpoint'}。请优先使用 /api-asxs/v1，同域代理可绕过跨域限制。原始错误：${failureMessage}`
+          : failureMessage
 
       setRunState({
         phase: 'error',
