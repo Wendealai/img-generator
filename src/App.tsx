@@ -177,6 +177,10 @@ const IMAGE_MODEL_FALLBACK_MODELS = ['nanobanana2']
 const OPENAI_IMAGE_TOOL_MODEL = 'gpt-image-2'
 const MODEL_UNAVAILABLE_PATTERN =
   /(全部渠道不可提供当前模型|当前模型不可用|model unavailable|not available|no channel|unsupported model)/i
+const INPUT_STREAM_ERROR_PATTERN = /error in input stream|input stream/i
+const MAX_IMAGE_INPUT_EDGE = 1536
+const MAX_IMAGE_INPUT_BYTES = 1_800_000
+const SUPPORTED_IMAGE_INPUT_MIME_TYPES = new Set(['image/png', 'image/jpeg', 'image/webp'])
 
 const ASXS_PROXY_BASE_URL = '/api-asxs/v1'
 const DIRECT_ASXS_BASE_URL = 'https://api.asxs.top/v1'
@@ -1026,6 +1030,75 @@ async function fileToBase64(file: File): Promise<string> {
   })
 }
 
+async function optimizeImageForModelInput(
+  file: File,
+): Promise<{ base64: string; mimeType: string }> {
+  const fallbackMimeType = file.type || 'image/png'
+  const fallback = async () => ({
+    base64: await fileToBase64(file),
+    mimeType: fallbackMimeType,
+  })
+
+  if (typeof document === 'undefined') {
+    return fallback()
+  }
+
+  try {
+    const bitmap = await createImageBitmap(file)
+    const maxEdge = Math.max(bitmap.width, bitmap.height)
+    const needsDownscale = maxEdge > MAX_IMAGE_INPUT_EDGE
+    const unsupportedMime = !SUPPORTED_IMAGE_INPUT_MIME_TYPES.has(file.type)
+    const needsSizeReduction = file.size > MAX_IMAGE_INPUT_BYTES
+
+    if (!needsDownscale && !unsupportedMime && !needsSizeReduction) {
+      bitmap.close()
+      return fallback()
+    }
+
+    const scale = needsDownscale ? MAX_IMAGE_INPUT_EDGE / maxEdge : 1
+    const width = Math.max(1, Math.round(bitmap.width * scale))
+    const height = Math.max(1, Math.round(bitmap.height * scale))
+    const canvas = document.createElement('canvas')
+    canvas.width = width
+    canvas.height = height
+    const context = canvas.getContext('2d')
+    if (!context) {
+      bitmap.close()
+      return fallback()
+    }
+
+    context.drawImage(bitmap, 0, 0, width, height)
+    bitmap.close()
+
+    const outputMimeType =
+      file.type === 'image/png' && !needsSizeReduction && !unsupportedMime ? 'image/png' : 'image/jpeg'
+    const outputQuality = outputMimeType === 'image/jpeg' ? 0.9 : undefined
+
+    const blob = await new Promise<Blob>((resolve, reject) => {
+      canvas.toBlob(
+        (candidate) => {
+          if (!candidate) {
+            reject(new Error('图片压缩失败'))
+            return
+          }
+          resolve(candidate)
+        },
+        outputMimeType,
+        outputQuality,
+      )
+    })
+
+    const normalizedFileName = outputMimeType === 'image/jpeg' ? 'upload.jpg' : 'upload.png'
+    const normalizedFile = new File([blob], normalizedFileName, { type: outputMimeType })
+    return {
+      base64: await fileToBase64(normalizedFile),
+      mimeType: outputMimeType,
+    }
+  } catch {
+    return fallback()
+  }
+}
+
 async function prepareRequest(
   mode: StudioMode,
   connection: ConnectionConfig,
@@ -1061,11 +1134,10 @@ async function prepareRequest(
 
       if (mode === 'image-to-image') {
         if (source.file) {
-          const base64 = await fileToBase64(source.file)
-          const mime = source.file.type || 'image/png'
+          const optimizedInput = await optimizeImageForModelInput(source.file)
           content.push({
             type: 'input_image',
-            image_url: `data:${mime};base64,${base64}`,
+            image_url: `data:${optimizedInput.mimeType};base64,${optimizedInput.base64}`,
           })
         } else if (source.imageUrl.trim()) {
           content.push({
@@ -1214,11 +1286,11 @@ async function prepareRequest(
 
   if (mode === 'image-to-image') {
     if (source.file) {
-      const base64 = await fileToBase64(source.file)
+      const optimizedInput = await optimizeImageForModelInput(source.file)
       parts.push({
         inlineData: {
-          mimeType: source.file.type || 'image/png',
-          data: base64,
+          mimeType: optimizedInput.mimeType,
+          data: optimizedInput.base64,
         },
       })
     } else if (source.imageUrl.trim()) {
@@ -1536,7 +1608,12 @@ function App() {
               )
               continue
             }
-            taskFailureMessage = failure
+            taskFailureMessage =
+              mode === 'image-to-image' &&
+              Boolean(source.file) &&
+              INPUT_STREAM_ERROR_PATTERN.test(failure)
+                ? `图生图输入流异常：${failure}。已自动做上传图规范化，若仍失败请改用外链图片 URL 或更小的 JPG/PNG。`
+                : failure
             break
           }
 
