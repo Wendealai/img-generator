@@ -476,7 +476,7 @@ function isResponsesEndpoint(value: string): boolean {
   if (!normalized) {
     return false
   }
-  return /\/responses(?:$|\?)/.test(normalized)
+  return /\/responses(?:\/|$|\?)/.test(normalized)
 }
 
 function withQueryParam(url: string, key: string, value: string): string {
@@ -814,6 +814,11 @@ function extractImages(payload: unknown): StudioImage[] {
 
   const walk = (node: unknown) => {
     if (typeof node === 'string') {
+      const parsedNode = parseJsonLikeString(node)
+      if (parsedNode !== node) {
+        walk(parsedNode)
+        return
+      }
       if (looksLikeImageUrl(node) || node.startsWith('data:image/')) {
         addImage(node)
       }
@@ -851,11 +856,16 @@ function extractImages(payload: unknown): StudioImage[] {
             ? 'image/jpeg'
             : mimeType
 
-      if (typeof result === 'string' && result.length > 40) {
-        if (result.startsWith('data:image/')) {
-          addImage(result, resultMimeType ?? 'image/png')
-        } else {
-          addImage(makeDataUrl(result, resultMimeType), resultMimeType ?? 'image/png')
+      if (typeof result === 'string') {
+        const parsedResult = parseJsonLikeString(result)
+        if (parsedResult !== result) {
+          walk(parsedResult)
+        } else if (result.length > 40) {
+          if (result.startsWith('data:image/')) {
+            addImage(result, resultMimeType ?? 'image/png')
+          } else {
+            addImage(makeDataUrl(result, resultMimeType), resultMimeType ?? 'image/png')
+          }
         }
       }
     }
@@ -1089,6 +1099,7 @@ async function prepareRequest(
           method: 'POST',
           headers: {
             ...headers,
+            Accept: 'text/event-stream, application/json',
             'Content-Type': 'application/json',
           },
           body: requestPreview,
@@ -1497,6 +1508,11 @@ function App() {
           })
           lastStatusCode = response.status
           lastAttemptLatencyMs = Math.round(performance.now() - attemptStartedAt)
+          const responseContentType = (response.headers.get('content-type') ?? '').toLowerCase()
+          const shouldParseSse =
+            Boolean(request.expectsSse) ||
+            responseContentType.includes('text/event-stream') ||
+            isResponsesEndpoint(request.endpoint)
 
           if (!response.ok) {
             const raw = await response.text()
@@ -1523,7 +1539,7 @@ function App() {
           let streamEventTypes: string[] = []
           let streamHasOutputItemDone = false
 
-          if (request.expectsSse) {
+          if (shouldParseSse) {
             const streamResult = await parseResponseSseStream(response)
             nextImages = streamResult.images
             outputText = streamResult.outputText
@@ -1542,14 +1558,16 @@ function App() {
           }
 
           if (nextImages.length === 0) {
-            if (request.expectsSse) {
+            if (shouldParseSse) {
               const recentEventTypes =
                 streamEventTypes.length > 0
                   ? streamEventTypes.slice(0, 10).join(', ')
                   : '未解析到事件类型'
               taskFailureMessage = streamHasOutputItemDone
                 ? `接口返回成功，检测到 response.output_item.done，但事件中未提取到可用图片数据（item.result 可能为空）。事件类型：${recentEventTypes}`
-                : `接口返回成功，但未检测到 response.output_item.done。事件类型：${recentEventTypes}`
+                : `接口返回成功，但未检测到 response.output_item.done。事件类型：${recentEventTypes}；content-type: ${
+                    responseContentType || 'unknown'
+                  }`
             } else {
               taskFailureMessage =
                 '接口返回成功，但未识别到图片数据。请检查 SSE 事件中是否包含 response.output_item.done。'
