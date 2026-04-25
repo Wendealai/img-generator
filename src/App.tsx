@@ -4103,18 +4103,21 @@ function App() {
       messageApi.error('请先输入提示词，再执行优化')
       return
     }
-    if (connection.backendMode !== 'n8n') {
-      messageApi.warning('提示词优化按钮当前走 n8n 工作流，请先切换后端模式为 n8n')
-      return
-    }
-    if (!connection.n8nBaseUrl.trim()) {
+    const promptOptimizeConnection = normalizeConnectionDefaults({
+      ...connection,
+      backendMode: 'n8n',
+    })
+    if (!promptOptimizeConnection.n8nBaseUrl.trim()) {
       messageApi.error('请先填写 n8n Base URL')
       return
     }
 
     setIsOptimizingPrompt(true)
-    const endpoint = buildN8nWebhookUrl(connection.n8nBaseUrl, connection.n8nPromptOptimizePath)
-    const headers = buildN8nHeaders(connection)
+    const endpoint = buildN8nWebhookUrl(
+      promptOptimizeConnection.n8nBaseUrl,
+      promptOptimizeConnection.n8nPromptOptimizePath,
+    )
+    const headers = buildN8nHeaders(promptOptimizeConnection)
     try {
       setRunState({
         phase: 'testing',
@@ -5895,7 +5898,7 @@ function App() {
               loading={isOptimizingPrompt}
               onClick={() => void handleOptimizePrompt()}
             >
-              提示词优化（n8n）
+              提示词优化
             </Button>
             <Button size="small" onClick={applySmartRecommendation}>
               智能参数推荐
