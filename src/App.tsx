@@ -1559,51 +1559,39 @@ async function parseResponseSseStream(response: Response): Promise<StreamParseRe
     }
   }
 
-  const processBlock = (block: string) => {
-    const trimmedBlock = block.trim()
-    if (!trimmedBlock) {
+  const parseSseField = (line: string, field: 'event' | 'data' | 'id' | 'retry'): string | null => {
+    const matched = line.match(new RegExp(`^${field}\\s*:\\s?(.*)$`, 'i'))
+    return matched ? matched[1] ?? '' : null
+  }
+
+  const registerEventType = (candidate: string) => {
+    const normalized = candidate.trim()
+    if (!normalized) {
+      return
+    }
+    eventTypes.add(normalized)
+    if (normalized === 'response.output_item.done') {
+      hasOutputItemDone = true
+    }
+  }
+
+  const processPayloadText = (payloadText: string, eventTypeHint: string) => {
+    const normalizedPayloadText = payloadText.trim()
+    if (!normalizedPayloadText || normalizedPayloadText === '[DONE]') {
       return
     }
 
-    rawBlocks.push(trimmedBlock)
-    const lines = trimmedBlock.split('\n')
-    let eventType = ''
-    const dataLines: string[] = []
-
-    for (const line of lines) {
-      const normalizedLine = line.trimStart()
-      if (normalizedLine.startsWith('event:')) {
-        eventType = normalizedLine.slice(6).trim()
-        continue
-      }
-      if (normalizedLine.startsWith('data:')) {
-        dataLines.push(normalizedLine.slice(5).trimStart())
-      }
-    }
-
-    if (dataLines.length === 0) {
-      return
-    }
-
-    const dataText = dataLines.join('\n').trim()
-    if (!dataText || dataText === '[DONE]') {
-      return
-    }
-
-    const payload = safeJsonParse(dataText)
+    const payload = safeJsonParse(normalizedPayloadText)
     parsedEvents.push(payload)
-    if (eventType) {
-      eventTypes.add(eventType)
-      if (eventType === 'response.output_item.done') {
-        hasOutputItemDone = true
-      }
+    if (eventTypeHint) {
+      registerEventType(eventTypeHint)
     }
 
     if (typeof payload === 'string') {
       textFragments.push(payload)
       events.push({
         at: new Date().toISOString(),
-        type: eventType || 'message',
+        type: eventTypeHint || 'message',
         preview: payload.slice(0, 220),
       })
       return
@@ -1618,25 +1606,20 @@ async function parseResponseSseStream(response: Response): Promise<StreamParseRe
         isRecord(nestedData) && typeof nestedData.event === 'string' ? nestedData.event.trim() : ''
 
       for (const candidate of [payloadType, payloadEvent, nestedType, nestedEvent]) {
-        if (!candidate) {
-          continue
-        }
-        eventTypes.add(candidate)
-        if (candidate === 'response.output_item.done') {
-          hasOutputItemDone = true
-        }
+        registerEventType(candidate)
       }
     }
+
     events.push({
       at: new Date().toISOString(),
-      type: eventType || (isRecord(payload) && typeof payload.type === 'string' ? payload.type : 'event'),
+      type: eventTypeHint || (isRecord(payload) && typeof payload.type === 'string' ? payload.type : 'event'),
       preview:
         typeof payload === 'string'
           ? payload.slice(0, 220)
           : JSON.stringify(payload).slice(0, 220),
     })
 
-    addImages(extractImagesFromOutputItemDoneEvent(eventType, payload))
+    addImages(extractImagesFromOutputItemDoneEvent(eventTypeHint, payload))
 
     if (isRecord(payload)) {
       const delta = payload.delta
@@ -1654,10 +1637,84 @@ async function parseResponseSseStream(response: Response): Promise<StreamParseRe
     }
   }
 
+  const processBlock = (block: string) => {
+    const trimmedBlock = block.trim()
+    if (!trimmedBlock) {
+      return
+    }
+
+    rawBlocks.push(trimmedBlock)
+    const lines = trimmedBlock.split('\n')
+    let eventType = ''
+    const dataLines: string[] = []
+    const loosePayloadLines: string[] = []
+
+    for (const rawLine of lines) {
+      const normalizedLine = rawLine.replace(/^\uFEFF/, '').trimStart()
+      if (!normalizedLine || normalizedLine.startsWith(':')) {
+        continue
+      }
+
+      const eventValue = parseSseField(normalizedLine, 'event')
+      if (eventValue !== null) {
+        eventType = eventValue.trim()
+        continue
+      }
+
+      const dataValue = parseSseField(normalizedLine, 'data')
+      if (dataValue !== null) {
+        dataLines.push(dataValue.trimStart())
+        continue
+      }
+
+      if (parseSseField(normalizedLine, 'id') !== null || parseSseField(normalizedLine, 'retry') !== null) {
+        continue
+      }
+
+      // Some non-standard gateways return JSON lines without explicit "data:" prefix.
+      loosePayloadLines.push(normalizedLine)
+    }
+
+    const payloadCandidates: string[] = []
+    if (dataLines.length > 0) {
+      const mergedPayload = dataLines.join('\n').trim()
+      if (mergedPayload) {
+        payloadCandidates.push(mergedPayload)
+      }
+      // Fallback for malformed SSE streams that separate events by single newline.
+      if (dataLines.length > 1) {
+        dataLines.forEach((line) => {
+          const trimmedLine = line.trim()
+          if (trimmedLine) {
+            payloadCandidates.push(trimmedLine)
+          }
+        })
+      }
+    } else if (loosePayloadLines.length > 0) {
+      const mergedLoosePayload = loosePayloadLines.join('\n').trim()
+      if (mergedLoosePayload) {
+        payloadCandidates.push(mergedLoosePayload)
+      }
+      if (loosePayloadLines.length > 1) {
+        loosePayloadLines.forEach((line) => {
+          const trimmedLine = line.trim()
+          if (trimmedLine) {
+            payloadCandidates.push(trimmedLine)
+          }
+        })
+      }
+    }
+
+    const uniquePayloadCandidates = Array.from(new Set(payloadCandidates))
+    uniquePayloadCandidates.forEach((payloadText) => {
+      processPayloadText(payloadText, eventType)
+    })
+  }
+
   while (true) {
     const { value, done } = await reader.read()
     const chunkText = decoder.decode(value ?? new Uint8Array(), { stream: !done })
-    const normalizedChunk = chunkText.replace(/\r\n/g, '\n').replace(/\r/g, '\n')
+    const normalizedChunk = chunkText.replace(/\uFEFF/g, '').replace(/\r\n/g, '\n').replace(/\r/g, '\n')
     fullText += normalizedChunk
     buffer += normalizedChunk
 
@@ -1684,9 +1741,51 @@ async function parseResponseSseStream(response: Response): Promise<StreamParseRe
   }
 
   if (parsedEvents.length === 0 && fullText.trim()) {
-    const fallbackPayload = safeJsonParse(fullText)
-    parsedEvents.push(fallbackPayload)
-    addImages(extractImages([fallbackPayload]))
+    const normalizedFullText = fullText.replace(/\uFEFF/g, '').trim()
+    const fallbackPayloads: unknown[] = []
+    const fallbackLines = normalizedFullText.split('\n').map((line) => line.trim()).filter(Boolean)
+    const fallbackCandidates = new Set<string>()
+    for (const line of fallbackLines) {
+      const dataValue = parseSseField(line, 'data')
+      if (dataValue !== null) {
+        const payload = dataValue.trim()
+        if (payload && payload !== '[DONE]') {
+          fallbackCandidates.add(payload)
+        }
+        continue
+      }
+      if (
+        parseSseField(line, 'event') !== null ||
+        parseSseField(line, 'id') !== null ||
+        parseSseField(line, 'retry') !== null
+      ) {
+        continue
+      }
+      fallbackCandidates.add(line)
+    }
+
+    for (const candidate of fallbackCandidates) {
+      const parsedCandidate = safeJsonParse(candidate)
+      if (parsedCandidate !== candidate || candidate.startsWith('{') || candidate.startsWith('[')) {
+        fallbackPayloads.push(parsedCandidate)
+      }
+    }
+
+    if (fallbackPayloads.length > 0) {
+      parsedEvents.push(...fallbackPayloads)
+      addImages(extractImages(fallbackPayloads))
+    } else {
+      const fallbackPayload = safeJsonParse(normalizedFullText)
+      parsedEvents.push(fallbackPayload)
+      addImages(extractImages([fallbackPayload]))
+    }
+  }
+
+  if (eventTypes.size === 0 && fullText.trim()) {
+    const responseEventMatches = fullText.match(/response\.[a-z_.]+/gi) ?? []
+    for (const match of responseEventMatches) {
+      registerEventType(match.toLowerCase())
+    }
   }
 
   const outputText = textFragments.join('').trim() || extractText(parsedEvents)
