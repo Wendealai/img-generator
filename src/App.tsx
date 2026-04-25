@@ -6,8 +6,11 @@ import {
   HistoryOutlined,
   PictureOutlined,
   ReloadOutlined,
+  SearchOutlined,
   SendOutlined,
   SettingOutlined,
+  StarFilled,
+  StarOutlined,
   ThunderboltOutlined,
   UploadOutlined,
 } from '@ant-design/icons'
@@ -39,6 +42,7 @@ type AuthMode = 'bearer' | 'query'
 type StudioMode = 'text-to-image' | 'image-to-image'
 type RunPhase = 'idle' | 'testing' | 'running' | 'success' | 'error'
 type BatchMode = 'single' | 'prompt-list' | 'reroll'
+type PromptTemplateScope = 'all' | 'favorites' | 'recent'
 
 interface ConnectionConfig {
   provider: Provider
@@ -118,12 +122,28 @@ interface BatchConfig {
   rerollCount: number
 }
 
+interface PromptTemplate {
+  id: string
+  label: string
+  category: string
+  tags: string[]
+  prompt: string
+  negativePrompt?: string
+  recommendedStyle?: string
+}
+
+interface PromptTemplateStore {
+  favorites: string[]
+  recent: string[]
+}
+
 const { Title, Paragraph, Text } = Typography
 
 const CONNECTION_KEY = 'aurora-image-studio.connection.v1'
 const GENERATION_KEY = 'aurora-image-studio.generation.v1'
 const HISTORY_KEY = 'aurora-image-studio.history.v1'
 const BATCH_KEY = 'aurora-image-studio.batch.v1'
+const PROMPT_TEMPLATE_KEY = 'aurora-image-studio.prompt-templates.v1'
 
 const OPENAI_MODELS = ['gpt-5.4', 'gpt-5.2', 'gpt-5.4-mini']
 const GEMINI_MODELS = ['nanobanana2']
@@ -152,27 +172,133 @@ const UI_UPGRADE_PLAN = [
     detail: '压缩低价值噪音，突出状态、模型与请求链路关键反馈。',
   },
 ]
-const PROMPT_PRESETS = [
+const PROMPT_TEMPLATE_LIBRARY: PromptTemplate[] = [
   {
+    id: 'cinematic-portrait',
     label: '电影级人像',
+    category: '人像',
+    tags: ['电影感', '85mm', '逆光'],
     prompt:
       '电影级写实人像，85mm镜头，浅景深，逆光轮廓光，真实皮肤细节，色彩层次丰富。',
+    negativePrompt: '畸形手部，皮肤塑料感，低清晰度，文字水印',
+    recommendedStyle: 'cinematic',
   },
   {
+    id: 'oriental-courtyard',
     label: '国风场景',
+    category: '场景',
+    tags: ['国风', '庭院', '体积光'],
     prompt:
       '中式古建筑庭院，丝绸服饰人物，晨雾光束，木结构细节清晰，电影构图，超清晰。',
+    negativePrompt: '现代广告牌，塑料质感，画面脏污，低对比',
+    recommendedStyle: 'cinematic',
   },
   {
+    id: 'luxury-product',
     label: '产品海报',
+    category: '商业',
+    tags: ['产品', '海报', '商业'],
     prompt:
       '高端产品商业海报，主体居中，玻璃与金属材质，工作室灯光，背景渐变，广告级质感。',
+    negativePrompt: 'LOGO错位，文案乱码，边缘模糊，噪点',
+    recommendedStyle: 'editorial',
   },
   {
+    id: 'cyberpunk-night',
     label: '赛博夜景',
+    category: '场景',
+    tags: ['赛博', '夜景', '霓虹'],
     prompt:
       '雨夜赛博城市街道，霓虹招牌反射，动态人群，体积光，广角镜头，视觉冲击力强。',
+    negativePrompt: '低对比，过曝高光，透视崩坏，细节糊化',
+    recommendedStyle: 'cinematic',
   },
+  {
+    id: 'editorial-fashion',
+    label: '时尚大片',
+    category: '人像',
+    tags: ['时尚', '棚拍', '大片'],
+    prompt:
+      '高级时尚杂志封面风格，冷色主调，利落造型，硬光与轮廓光，服装材质层次分明。',
+    negativePrompt: '廉价布料感，五官错位，肢体异常，杂乱背景',
+    recommendedStyle: 'editorial',
+  },
+  {
+    id: 'brand-key-visual',
+    label: '品牌主视觉',
+    category: '品牌',
+    tags: ['品牌', '主视觉', 'KV'],
+    prompt:
+      '品牌主视觉海报，强识别色块与几何构图，主体突出，氛围简洁，适用于首页首屏。',
+    negativePrompt: '构图拥挤，信息噪音，低饱和发灰，主体不清晰',
+    recommendedStyle: 'editorial',
+  },
+  {
+    id: 'ink-illustration',
+    label: '水墨插画',
+    category: '插画',
+    tags: ['水墨', '插画', '留白'],
+    prompt:
+      '东方水墨插画风，留白构图，墨色层次自然，山石树木细腻，画面意境空灵。',
+    negativePrompt: '油画笔触，西式写实阴影，过度锐化，颜色脏浊',
+    recommendedStyle: 'ink & wash',
+  },
+  {
+    id: 'fantasy-creature',
+    label: '奇幻生物',
+    category: '插画',
+    tags: ['奇幻', '角色', '设定'],
+    prompt:
+      '奇幻世界生物设定图，完整全身，精致材质，动态姿态，环境氛围光丰富，概念设定级质量。',
+    negativePrompt: '解剖错误，比例失衡，武器穿模，纹理糊化',
+    recommendedStyle: 'fantasy art',
+  },
+  {
+    id: 'architecture-wide',
+    label: '建筑广角',
+    category: '场景',
+    tags: ['建筑', '广角', '空间'],
+    prompt:
+      '现代建筑外观广角拍摄，透视准确，线条干净，天空层次丰富，建筑材质真实。',
+    negativePrompt: '透视歪斜，线条抖动，玻璃反射异常，边缘锯齿',
+    recommendedStyle: 'photoreal',
+  },
+  {
+    id: 'food-closeup',
+    label: '美食特写',
+    category: '商业',
+    tags: ['美食', '特写', '广告'],
+    prompt:
+      '美食广告级特写，浅景深，食材纹理与光泽清晰，暖色氛围光，画面具有食欲感。',
+    negativePrompt: '食材变形，脏污餐具，油腻反光过强，低清晰度',
+    recommendedStyle: 'photoreal',
+  },
+  {
+    id: 'anime-poster',
+    label: '动漫海报',
+    category: '海报',
+    tags: ['动漫', '海报', '高饱和'],
+    prompt:
+      '二次元角色海报构图，强烈色彩对比，清晰线稿，动态姿势，背景具备叙事元素。',
+    negativePrompt: '线条模糊，手指错误，脸部崩坏，画面脏点',
+    recommendedStyle: 'illustration',
+  },
+  {
+    id: 'minimal-product',
+    label: '极简产品图',
+    category: '商业',
+    tags: ['极简', '产品', '静物'],
+    prompt:
+      '极简产品静物图，干净背景，单向主光，柔和阴影，材质细节准确，留足版面空间。',
+    negativePrompt: '背景脏乱，材质失真，过度反射，主体偏移',
+    recommendedStyle: 'editorial',
+  },
+]
+const QUICK_TEMPLATE_IDS = [
+  'cinematic-portrait',
+  'oriental-courtyard',
+  'luxury-product',
+  'cyberpunk-night',
 ]
 const PROMPT_GUIDE_URL = 'https://youmind.com/zh-CN/gpt-image-2-prompts'
 const IMAGE_MODEL_FALLBACK_MODELS = ['nanobanana2']
@@ -220,6 +346,11 @@ const DEFAULT_BATCH: BatchConfig = {
   mode: 'single',
   promptList: '',
   rerollCount: 6,
+}
+
+const DEFAULT_PROMPT_TEMPLATE_STORE: PromptTemplateStore = {
+  favorites: [],
+  recent: [],
 }
 
 const INITIAL_RUN_STATE: RunState = {
@@ -421,6 +552,35 @@ function readStoredHistory(): HistoryRecord[] {
       })
   } catch {
     return []
+  }
+}
+
+function normalizePromptTemplateIds(value: unknown): string[] {
+  if (!Array.isArray(value)) {
+    return []
+  }
+  const templateIds = new Set(PROMPT_TEMPLATE_LIBRARY.map((item) => item.id))
+  const deduped: string[] = []
+  for (const item of value) {
+    if (typeof item !== 'string') {
+      continue
+    }
+    if (!templateIds.has(item) || deduped.includes(item)) {
+      continue
+    }
+    deduped.push(item)
+    if (deduped.length >= 40) {
+      break
+    }
+  }
+  return deduped
+}
+
+function readStoredPromptTemplateStore(): PromptTemplateStore {
+  const parsed = readStoredObject(PROMPT_TEMPLATE_KEY, DEFAULT_PROMPT_TEMPLATE_STORE)
+  return {
+    favorites: normalizePromptTemplateIds(parsed.favorites),
+    recent: normalizePromptTemplateIds(parsed.recent).slice(0, 20),
   }
 }
 
@@ -1397,6 +1557,12 @@ function App() {
   const [batchConfig, setBatchConfig] = useState<BatchConfig>(() =>
     readStoredObject(BATCH_KEY, DEFAULT_BATCH),
   )
+  const [promptTemplateStore, setPromptTemplateStore] = useState<PromptTemplateStore>(() =>
+    readStoredPromptTemplateStore(),
+  )
+  const [templateScope, setTemplateScope] = useState<PromptTemplateScope>('all')
+  const [templateCategory, setTemplateCategory] = useState<string>('all')
+  const [templateQuery, setTemplateQuery] = useState('')
   const [source, setSource] = useState<ImageSourceState>({
     file: null,
     previewUrl: '',
@@ -1427,6 +1593,10 @@ function App() {
   useEffect(() => {
     safeLocalStorageSet(BATCH_KEY, JSON.stringify(batchConfig))
   }, [batchConfig])
+
+  useEffect(() => {
+    safeLocalStorageSet(PROMPT_TEMPLATE_KEY, JSON.stringify(promptTemplateStore))
+  }, [promptTemplateStore])
 
   useEffect(() => {
     safeLocalStorageSet(HISTORY_KEY, JSON.stringify(sanitizeHistoryForStorage(history)))
@@ -1484,6 +1654,108 @@ function App() {
     const path = connection.geminiPathTemplate.replace('{model}', connection.model.trim())
     return buildUrl(runtimeBaseUrl, path)
   }, [connection, mode])
+
+  const promptTemplateById = useMemo(
+    () => new Map(PROMPT_TEMPLATE_LIBRARY.map((item) => [item.id, item])),
+    [],
+  )
+
+  const quickPromptTemplates = useMemo(() => {
+    const list: PromptTemplate[] = []
+    for (const id of QUICK_TEMPLATE_IDS) {
+      const item = promptTemplateById.get(id)
+      if (item) {
+        list.push(item)
+      }
+    }
+    return list
+  }, [promptTemplateById])
+
+  const promptTemplateCategories = useMemo(() => {
+    const categorySet = new Set(PROMPT_TEMPLATE_LIBRARY.map((item) => item.category))
+    return ['all', ...Array.from(categorySet)]
+  }, [])
+
+  const favoriteTemplateSet = useMemo(
+    () => new Set(promptTemplateStore.favorites),
+    [promptTemplateStore.favorites],
+  )
+
+  const recentTemplateSet = useMemo(
+    () => new Set(promptTemplateStore.recent),
+    [promptTemplateStore.recent],
+  )
+
+  const filteredPromptTemplates = useMemo(() => {
+    const keyword = templateQuery.trim().toLowerCase()
+    return PROMPT_TEMPLATE_LIBRARY.filter((template) => {
+      if (templateScope === 'favorites' && !favoriteTemplateSet.has(template.id)) {
+        return false
+      }
+      if (templateScope === 'recent' && !recentTemplateSet.has(template.id)) {
+        return false
+      }
+      if (templateCategory !== 'all' && template.category !== templateCategory) {
+        return false
+      }
+      if (!keyword) {
+        return true
+      }
+      const searchText = [
+        template.label,
+        template.category,
+        template.prompt,
+        template.negativePrompt ?? '',
+        template.tags.join(' '),
+      ]
+        .join(' ')
+        .toLowerCase()
+      return searchText.includes(keyword)
+    })
+  }, [favoriteTemplateSet, recentTemplateSet, templateCategory, templateQuery, templateScope])
+
+  const recentPromptTemplates = useMemo(() => {
+    const list: PromptTemplate[] = []
+    for (const templateId of promptTemplateStore.recent) {
+      const matched = promptTemplateById.get(templateId)
+      if (matched) {
+        list.push(matched)
+      }
+      if (list.length >= 6) {
+        break
+      }
+    }
+    return list
+  }, [promptTemplateById, promptTemplateStore.recent])
+
+  const applyPromptTemplate = (template: PromptTemplate) => {
+    setGeneration((previous) => ({
+      ...previous,
+      prompt: template.prompt,
+      negativePrompt: template.negativePrompt ?? previous.negativePrompt,
+      style:
+        previous.style === 'auto'
+          ? template.recommendedStyle ?? 'cinematic'
+          : previous.style,
+    }))
+    setPromptTemplateStore((previous) => ({
+      ...previous,
+      recent: [template.id, ...previous.recent.filter((item) => item !== template.id)].slice(0, 20),
+    }))
+    messageApi.success(`已套用模板：${template.label}`)
+  }
+
+  const toggleFavoriteTemplate = (templateId: string) => {
+    setPromptTemplateStore((previous) => {
+      const isFavorited = previous.favorites.includes(templateId)
+      return {
+        ...previous,
+        favorites: isFavorited
+          ? previous.favorites.filter((item) => item !== templateId)
+          : [templateId, ...previous.favorites].slice(0, 40),
+      }
+    })
+  }
 
   const handleProviderChange = (nextProvider: string) => {
     if (nextProvider !== 'openai' && nextProvider !== 'gemini') {
@@ -2108,22 +2380,135 @@ function App() {
       children: (
         <div className="tab-content">
           <div className="preset-strip">
-            {PROMPT_PRESETS.map((preset) => (
+            {quickPromptTemplates.map((template) => (
               <Button
-                key={preset.label}
+                key={template.id}
                 size="small"
-                className={generation.prompt.trim() === preset.prompt ? 'preset-chip is-active' : 'preset-chip'}
-                onClick={() =>
-                  setGeneration((previous) => ({
-                    ...previous,
-                    prompt: preset.prompt,
-                    style: previous.style === 'auto' ? 'cinematic' : previous.style,
-                  }))
-                }
+                className={generation.prompt.trim() === template.prompt ? 'preset-chip is-active' : 'preset-chip'}
+                onClick={() => applyPromptTemplate(template)}
               >
-                {preset.label}
+                {template.label}
               </Button>
             ))}
+            <Button
+              size="small"
+              icon={<StarOutlined />}
+              onClick={() => setTemplateScope('favorites')}
+            >
+              只看收藏
+            </Button>
+          </div>
+
+          <div className="template-center">
+            <div className="template-center-head">
+              <Text className="field-label">提示词模板中心</Text>
+              <Space wrap size={6}>
+                <Tag color="gold">收藏 {promptTemplateStore.favorites.length}</Tag>
+                <Tag icon={<ClockCircleOutlined />}>最近 {promptTemplateStore.recent.length}</Tag>
+                <Tag>模板库 {PROMPT_TEMPLATE_LIBRARY.length}</Tag>
+              </Space>
+            </div>
+
+            <div className="template-center-toolbar">
+              <Input
+                allowClear
+                prefix={<SearchOutlined />}
+                value={templateQuery}
+                onChange={(event) => setTemplateQuery(event.target.value)}
+                placeholder="搜索模板名称、标签、场景、关键词..."
+              />
+              <Segmented
+                value={templateScope}
+                options={[
+                  { label: '全部', value: 'all' },
+                  { label: '收藏', value: 'favorites' },
+                  { label: '最近', value: 'recent' },
+                ]}
+                onChange={(value) =>
+                  setTemplateScope(
+                    value === 'favorites' || value === 'recent'
+                      ? value
+                      : 'all',
+                  )
+                }
+              />
+              <Select
+                value={templateCategory}
+                style={{ minWidth: 150 }}
+                options={promptTemplateCategories.map((category) => ({
+                  label: category === 'all' ? '全部分类' : category,
+                  value: category,
+                }))}
+                onChange={(value) => setTemplateCategory(String(value))}
+              />
+            </div>
+
+            {filteredPromptTemplates.length === 0 ? (
+              <Empty
+                image={Empty.PRESENTED_IMAGE_SIMPLE}
+                description="没有匹配到模板，请调整筛选条件"
+              />
+            ) : (
+              <div className="template-grid">
+                {filteredPromptTemplates.map((template) => {
+                  const isFavorite = favoriteTemplateSet.has(template.id)
+                  return (
+                    <article key={template.id} className="template-item">
+                      <div className="template-item-main">
+                        <div className="template-item-head">
+                          <Text strong>{template.label}</Text>
+                          <Space size={6}>
+                            <Tag color="geekblue">{template.category}</Tag>
+                            {isFavorite ? <Tag color="gold">已收藏</Tag> : null}
+                          </Space>
+                        </div>
+                        <Paragraph className="template-item-prompt" ellipsis={{ rows: 2 }}>
+                          {template.prompt}
+                        </Paragraph>
+                        <Space wrap size={[6, 6]}>
+                          {template.tags.map((tag) => (
+                            <Tag key={`${template.id}-${tag}`}>{tag}</Tag>
+                          ))}
+                        </Space>
+                      </div>
+                      <div className="template-item-actions">
+                        <Button
+                          type="primary"
+                          size="small"
+                          onClick={() => applyPromptTemplate(template)}
+                        >
+                          套用
+                        </Button>
+                        <Button
+                          size="small"
+                          icon={isFavorite ? <StarFilled /> : <StarOutlined />}
+                          onClick={() => toggleFavoriteTemplate(template.id)}
+                        >
+                          {isFavorite ? '取消收藏' : '收藏'}
+                        </Button>
+                      </div>
+                    </article>
+                  )
+                })}
+              </div>
+            )}
+
+            {recentPromptTemplates.length > 0 ? (
+              <div className="template-recent-strip">
+                <Text type="secondary">最近使用：</Text>
+                <Space wrap size={8}>
+                  {recentPromptTemplates.map((template) => (
+                    <Button
+                      key={`recent-${template.id}`}
+                      size="small"
+                      onClick={() => applyPromptTemplate(template)}
+                    >
+                      {template.label}
+                    </Button>
+                  ))}
+                </Space>
+              </div>
+            ) : null}
           </div>
 
           <Text className="field-label">提示词</Text>
