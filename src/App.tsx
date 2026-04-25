@@ -542,7 +542,7 @@ const SUPPORTED_IMAGE_INPUT_MIME_TYPES = new Set(['image/png', 'image/jpeg', 'im
 const ASXS_PROXY_BASE_URL = '/api-asxs/v1'
 const DIRECT_ASXS_BASE_URL = 'https://api.asxs.top/v1'
 const DEFAULT_OPENAI_BASE_URL = ASXS_PROXY_BASE_URL
-const DEFAULT_N8N_BASE_URL = '/api-n8n'
+const DEFAULT_N8N_BASE_URL = 'https://n8n.wendealai.com'
 const DEFAULT_N8N_PROMPT_OPTIMIZE_PATH = '/webhook/img-prompt-optimize'
 const DEFAULT_N8N_GENERATE_PATH = '/webhook/img-generate-submit'
 const DEFAULT_N8N_STATUS_PATH = '/webhook/img-job-status'
@@ -6616,7 +6616,7 @@ function App() {
                           n8nBaseUrl: event.target.value,
                         }))
                       }
-                    placeholder="https://n8n.your-domain.com 或 /api-n8n"
+                    placeholder="https://n8n.wendealai.com 或 /api-n8n"
                     />
                   </div>
               )}

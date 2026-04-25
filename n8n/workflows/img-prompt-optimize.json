@@ -49,8 +49,11 @@
         "jsonBody": "={{$json.requestPayload}}",
         "options": {
           "timeout": 120000
-        }
-      }
+        },
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "openAiApi"
+      },
+      "continueOnFail": true
     },
     {
       "id": "format_prompt_output",
@@ -62,7 +65,7 @@
         80
       ],
       "parameters": {
-        "jsCode": "const payload = ($json.body && typeof $json.body === 'object') ? $json.body : $json;\nconst readText = (node) => {\n  if (!node) return '';\n  if (typeof node === 'string') return node.trim();\n  if (Array.isArray(node)) {\n    for (const item of node) {\n      const text = readText(item);\n      if (text) return text;\n    }\n    return '';\n  }\n  if (typeof node !== 'object') return '';\n  const candidates = [\n    node.output_text,\n    node.text,\n    node.message,\n    node.content,\n  ];\n  for (const candidate of candidates) {\n    const text = readText(candidate);\n    if (text) return text;\n  }\n  for (const value of Object.values(node)) {\n    const text = readText(value);\n    if (text) return text;\n  }\n  return '';\n};\nconst outputText = readText(payload);\nif (!outputText) {\n  throw new Error('Responses API returned no optimization text.');\n}\nconst optimizedPrompt = outputText.slice(0, 6000).trim();\nreturn [{\n  json: {\n    ok: true,\n    optimizedPrompt,\n    summary: optimizedPrompt.slice(0, 500),\n    raw: payload,\n  },\n}];"
+        "jsCode": "const payload = ($json.body && typeof $json.body === 'object') ? $json.body : $json;\n\nif (payload && typeof payload === 'object') {\n  const upstreamError = payload.error || payload.errors || null;\n  if (upstreamError) {\n    const message = typeof upstreamError === 'string'\n      ? upstreamError\n      : typeof payload.message === 'string'\n        ? payload.message\n        : typeof upstreamError.message === 'string'\n          ? upstreamError.message\n          : JSON.stringify(upstreamError).slice(0, 2000);\n    return [{\n      json: {\n        ok: false,\n        status: 'upstream_error',\n        message,\n        raw: payload,\n      },\n    }];\n  }\n}\n\nconst candidates = [];\nconst seen = new Set();\nconst pushCandidate = (value) => {\n  if (typeof value !== 'string') return;\n  const text = value.trim();\n  if (!text) return;\n  if (seen.has(text)) return;\n  seen.add(text);\n  candidates.push(text);\n};\n\nif (Array.isArray(payload.output)) {\n  for (const item of payload.output) {\n    if (!item || typeof item !== 'object') continue;\n    if (!Array.isArray(item.content)) continue;\n    for (const part of item.content) {\n      if (!part || typeof part !== 'object') continue;\n      if (part.type === 'output_text') {\n        pushCandidate(part.text);\n      }\n    }\n  }\n}\n\nif (typeof payload.output_text === 'string') {\n  pushCandidate(payload.output_text);\n} else if (Array.isArray(payload.output_text)) {\n  for (const chunk of payload.output_text) {\n    if (typeof chunk === 'string') {\n      pushCandidate(chunk);\n      continue;\n    }\n    if (chunk && typeof chunk === 'object') {\n      pushCandidate(chunk.text);\n    }\n  }\n}\n\nconst walk = (node, path = '') => {\n  if (!node) return;\n\n  if (Array.isArray(node)) {\n    node.forEach((item, index) => walk(item, `${path}[${index}]`));\n    return;\n  }\n\n  if (typeof node !== 'object') return;\n\n  if (typeof node.text === 'string') {\n    const type = typeof node.type === 'string' ? node.type : '';\n    if (type === 'output_text' || /content|message|choice|result|response/i.test(path)) {\n      pushCandidate(node.text);\n    }\n  }\n\n  if (typeof node.output_text === 'string') {\n    pushCandidate(node.output_text);\n  }\n\n  const allowedKeys = new Set([\n    'output',\n    'content',\n    'message',\n    'messages',\n    'choices',\n    'parts',\n    'data',\n    'result',\n    'response',\n    'items',\n    'tool_outputs',\n    'output_text',\n  ]);\n\n  for (const [key, value] of Object.entries(node)) {\n    if (!allowedKeys.has(key)) continue;\n    walk(value, path ? `${path}.${key}` : key);\n  }\n};\n\nif (candidates.length === 0) {\n  walk(payload);\n}\n\nconst optimizedPrompt = (candidates.find((text) => text.length > 8) || candidates[0] || '').slice(0, 6000).trim();\nif (!optimizedPrompt) {\n  throw new Error('Responses API returned no optimization text.');\n}\n\nreturn [{\n  json: {\n    ok: true,\n    optimizedPrompt,\n    summary: optimizedPrompt.slice(0, 500),\n    raw: payload,\n  },\n}];"
       }
     }
   ],
