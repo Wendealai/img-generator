@@ -485,6 +485,7 @@
   border: 1px solid rgba(130, 174, 206, 0.52);
   overflow: hidden;
   background: rgba(250, 254, 255, 0.95);
+  cursor: zoom-in;
   transition:
     transform 220ms ease,
     border-color 220ms ease,
@@ -497,11 +498,31 @@
   box-shadow: 0 12px 24px rgba(29, 104, 150, 0.16);
 }
 
+.image-card:focus-visible {
+  outline: 2px solid rgba(24, 145, 135, 0.76);
+  outline-offset: 2px;
+}
+
 .image-card img {
   width: 100%;
   aspect-ratio: 1 / 1;
   object-fit: cover;
   display: block;
+}
+
+.image-preview-stage {
+  border-radius: 12px;
+  border: 1px solid rgba(124, 171, 203, 0.45);
+  background: rgba(248, 252, 255, 0.95);
+  overflow: hidden;
+}
+
+.image-preview-stage img {
+  display: block;
+  width: 100%;
+  max-height: min(78vh, 880px);
+  object-fit: contain;
+  background: #ffffff;
 }
 
 .image-actions {

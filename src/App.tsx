@@ -20,6 +20,7 @@ import {
   Empty,
   Input,
   InputNumber,
+  Modal,
   Segmented,
   Select,
   Slider,
@@ -1409,6 +1410,7 @@ function App() {
   const [history, setHistory] = useState<HistoryRecord[]>(() => readStoredHistory())
   const [isGenerating, setIsGenerating] = useState(false)
   const [isTesting, setIsTesting] = useState(false)
+  const [previewImage, setPreviewImage] = useState<StudioImage | null>(null)
 
   const abortRef = useRef<AbortController | null>(null)
   const previewUrlRef = useRef<string>('')
@@ -1510,6 +1512,15 @@ function App() {
       file: nextFile,
       previewUrl,
     }))
+  }
+
+  const handleUseAsReferenceImage = (image: StudioImage) => {
+    setMode('image-to-image')
+    setSource((previous) => ({
+      ...previous,
+      imageUrl: image.src,
+    }))
+    messageApi.success('已填入图生图参考图 URL')
   }
 
   const handleCancel = () => {
@@ -2730,6 +2741,7 @@ function App() {
                   icon={<ReloadOutlined />}
                   onClick={() => {
                     setImages([])
+                    setPreviewImage(null)
                     setResponseText('')
                     setRawResponse('')
                     setRequestPreview('')
@@ -2757,14 +2769,28 @@ function App() {
             {images.length > 0 ? (
               <div className="image-grid">
                 {images.map((image) => (
-                  <article key={image.id} className="image-card">
+                  <article
+                    key={image.id}
+                    className="image-card"
+                    role="button"
+                    tabIndex={0}
+                    aria-label="查看大图"
+                    onClick={() => setPreviewImage(image)}
+                    onKeyDown={(event) => {
+                      if (event.key === 'Enter' || event.key === ' ') {
+                        event.preventDefault()
+                        setPreviewImage(image)
+                      }
+                    }}
+                  >
                     <img src={image.src} alt="模型生成结果图" />
                     <div className="image-actions">
                       <Tooltip title="下载图片">
                         <Button
                           type="text"
                           icon={<DownloadOutlined />}
-                          onClick={() => {
+                          onClick={(event) => {
+                            event.stopPropagation()
                             void downloadImage(image).catch(() => {
                               messageApi.error('下载失败，请检查图片链接是否可访问')
                             })
@@ -2775,13 +2801,9 @@ function App() {
                         <Button
                           type="text"
                           icon={<UploadOutlined />}
-                          onClick={() => {
-                            setMode('image-to-image')
-                            setSource((previous) => ({
-                              ...previous,
-                              imageUrl: image.src,
-                            }))
-                            messageApi.success('已填入图生图参考图 URL')
+                          onClick={(event) => {
+                            event.stopPropagation()
+                            handleUseAsReferenceImage(image)
                           }}
                         />
                       </Tooltip>
@@ -2791,6 +2813,46 @@ function App() {
               </div>
             ) : null}
           </Card>
+
+          <Modal
+            open={Boolean(previewImage)}
+            title="图片预览"
+            width="min(96vw, 1120px)"
+            centered
+            onCancel={() => setPreviewImage(null)}
+            footer={
+              previewImage ? (
+                <Space>
+                  <Button
+                    icon={<UploadOutlined />}
+                    onClick={() => {
+                      handleUseAsReferenceImage(previewImage)
+                      setPreviewImage(null)
+                    }}
+                  >
+                    设为图生图参考图
+                  </Button>
+                  <Button
+                    type="primary"
+                    icon={<DownloadOutlined />}
+                    onClick={() => {
+                      void downloadImage(previewImage).catch(() => {
+                        messageApi.error('下载失败，请检查图片链接是否可访问')
+                      })
+                    }}
+                  >
+                    下载图片
+                  </Button>
+                </Space>
+              ) : null
+            }
+          >
+            {previewImage ? (
+              <div className="image-preview-stage">
+                <img src={previewImage.src} alt="预览大图" />
+              </div>
+            ) : null}
+          </Modal>
 
           <Card
             className="studio-card output-card"
