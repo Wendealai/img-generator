@@ -364,6 +364,17 @@
   background: rgba(224, 242, 253, 0.9) !important;
 }
 
+.i2i-reroll-shortcuts {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 2px;
+  padding: 10px;
+  border-radius: 10px;
+  border: 1px solid rgba(134, 176, 205, 0.45);
+  background: rgba(246, 252, 255, 0.88);
+}
+
 .preset-strip {
   display: flex;
   flex-wrap: wrap;

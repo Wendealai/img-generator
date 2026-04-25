@@ -2152,7 +2152,12 @@ function App() {
     },
     {
       key: 'image-to-image',
-      label: '图生图',
+      label: (
+        <Space size={6}>
+          <span>图生图</span>
+          <Tag color="cyan">含抽卡</Tag>
+        </Space>
+      ),
       children: (
         <div className="tab-content">
           <Text className="field-label">重绘提示词</Text>
@@ -2174,6 +2179,47 @@ function App() {
             }
             placeholder="图生图负向限制"
           />
+          <div className="i2i-reroll-shortcuts">
+            <Text type="secondary">图生图支持抽卡：一键切换模式</Text>
+            <Space wrap size={8}>
+              <Button
+                size="small"
+                type={batchConfig.mode === 'single' ? 'primary' : 'default'}
+                onClick={() =>
+                  setBatchConfig((previous) => ({
+                    ...previous,
+                    mode: 'single',
+                  }))
+                }
+              >
+                单次
+              </Button>
+              <Button
+                size="small"
+                type={batchConfig.mode === 'reroll' ? 'primary' : 'default'}
+                onClick={() =>
+                  setBatchConfig((previous) => ({
+                    ...previous,
+                    mode: 'reroll',
+                  }))
+                }
+              >
+                抽卡
+              </Button>
+              <Button
+                size="small"
+                type={batchConfig.mode === 'prompt-list' ? 'primary' : 'default'}
+                onClick={() =>
+                  setBatchConfig((previous) => ({
+                    ...previous,
+                    mode: 'prompt-list',
+                  }))
+                }
+              >
+                多提示词
+              </Button>
+            </Space>
+          </div>
           {renderBatchControl('image')}
 
           <div className="upload-row">
