@@ -1,0 +1,110 @@
+{
+  "name": "img-generate-submit",
+  "nodes": [
+    {
+      "id": "webhook_generate_submit",
+      "name": "Webhook Generate Submit",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        -760,
+        100
+      ],
+      "parameters": {
+        "path": "img-generate-submit",
+        "httpMethod": "POST",
+        "responseMode": "lastNode",
+        "options": {}
+      },
+      "webhookId": "img-generate-submit"
+    },
+    {
+      "id": "prepare_generate_payload",
+      "name": "Prepare Generate Payload",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -470,
+        100
+      ],
+      "parameters": {
+        "jsCode": "const body = ($json.body && typeof $json.body === 'object') ? $json.body : $json;\nconst prompt = String(body.prompt ?? body.promptRaw ?? '').trim();\nif (!prompt) {\n  throw new Error('Missing prompt');\n}\nconst mode = String(body.mode ?? 'text-to-image');\nconst model = String(body.model ?? 'gpt-5.5').trim() || 'gpt-5.5';\nconst toolModel = String(body.toolModel ?? 'gpt-image-2').trim() || 'gpt-image-2';\nconst content = [{ type: 'input_text', text: prompt }];\nif (mode === 'image-to-image') {\n  const source = body.source && typeof body.source === 'object' ? body.source : {};\n  const imageBase64 = String(source.imageBase64 ?? '').trim();\n  const imageUrl = String(source.imageUrl ?? '').trim();\n  const mimeType = String(source.mimeType ?? 'image/png').trim() || 'image/png';\n  if (imageBase64) {\n    content.push({\n      type: 'input_image',\n      image_url: imageBase64.startsWith('data:image/') ? imageBase64 : ('data:' + mimeType + ';base64,' + imageBase64),\n    });\n  } else if (imageUrl) {\n    content.push({\n      type: 'input_image',\n      image_url: imageUrl,\n    });\n  } else {\n    throw new Error('Image-to-image requires source.imageBase64 or source.imageUrl');\n  }\n}\nconst requestPayload = {\n  model,\n  stream: true,\n  input: [\n    {\n      role: 'user',\n      content,\n    },\n  ],\n  tool_choice: {\n    type: 'image_generation',\n  },\n  tools: [\n    {\n      type: 'image_generation',\n      model: toolModel,\n    },\n  ],\n};\nreturn [{\n  json: {\n    requestPayload,\n    requestMeta: {\n      requestId: String(body.requestId ?? ''),\n      mode,\n      model,\n      toolModel,\n      prompt: prompt.slice(0, 400),\n    },\n  },\n}];"
+      }
+    },
+    {
+      "id": "call_asxs_responses_generate",
+      "name": "Call ASXS Responses",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        -170,
+        100
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.asxs.top/v1/responses",
+        "sendBody": true,
+        "contentType": "json",
+        "specifyBody": "json",
+        "jsonBody": "={{$json.requestPayload}}",
+        "responseFormat": "string",
+        "options": {
+          "timeout": 180000
+        }
+      }
+    },
+    {
+      "id": "extract_images_from_sse",
+      "name": "Extract Images From SSE",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        150,
+        100
+      ],
+      "parameters": {
+        "jsCode": "const source = $json;\nconst raw = typeof source.body === 'string'\n  ? source.body\n  : typeof source.data === 'string'\n    ? source.data\n    : typeof source === 'string'\n      ? source\n      : JSON.stringify(source);\n\nconst eventTypes = new Set();\nconst outputTextChunks = [];\nconst images = [];\nconst imageSet = new Set();\nlet hasOutputItemDone = false;\n\nconst toDataUrl = (base64, mimeType = 'image/png') => {\n  const normalized = String(base64 || '').replace(/\\s+/g, '');\n  if (!normalized) return '';\n  return normalized.startsWith('data:image/') ? normalized : ('data:' + mimeType + ';base64,' + normalized);\n};\n\nconst addImage = (base64, mimeType = 'image/png') => {\n  const src = toDataUrl(base64, mimeType);\n  if (!src || imageSet.has(src)) return;\n  imageSet.add(src);\n  images.push({ src, mimeType });\n};\n\nconst walk = (node) => {\n  if (!node) return;\n  if (typeof node === 'string') {\n    const trimmed = node.trim();\n    if (!trimmed) return;\n    if (trimmed.startsWith('{') || trimmed.startsWith('[')) {\n      try {\n        walk(JSON.parse(trimmed));\n      } catch {\n        if (trimmed.length > 32) outputTextChunks.push(trimmed);\n      }\n      return;\n    }\n    if (trimmed.length > 32) outputTextChunks.push(trimmed);\n    return;\n  }\n  if (Array.isArray(node)) {\n    node.forEach(walk);\n    return;\n  }\n  if (typeof node !== 'object') return;\n\n  const nodeType = typeof node.type === 'string' ? node.type : '';\n  const nodeEvent = typeof node.event === 'string' ? node.event : '';\n  if (nodeType) eventTypes.add(nodeType);\n  if (nodeEvent) eventTypes.add(nodeEvent);\n  if (nodeType === 'response.output_item.done' || nodeEvent === 'response.output_item.done') {\n    hasOutputItemDone = true;\n  }\n\n  const mimeType = typeof node.mime_type === 'string'\n    ? node.mime_type\n    : typeof node.mimeType === 'string'\n      ? node.mimeType\n      : (typeof node.output_format === 'string' && node.output_format.toLowerCase() === 'jpeg' ? 'image/jpeg' : 'image/png');\n\n  if (nodeType === 'image_generation_call' && typeof node.result === 'string' && node.result.length > 40) {\n    addImage(node.result, mimeType);\n  }\n\n  const base64Keys = ['b64_json', 'b64', 'base64', 'image_base64', 'imageBase64', 'result'];\n  for (const key of base64Keys) {\n    const value = node[key];\n    if (typeof value === 'string' && value.length > 40) {\n      addImage(value, mimeType);\n    }\n  }\n\n  if (node.inlineData && typeof node.inlineData === 'object' && typeof node.inlineData.data === 'string') {\n    addImage(node.inlineData.data, node.inlineData.mimeType || mimeType);\n  }\n\n  for (const value of Object.values(node)) {\n    walk(value);\n  }\n};\n\nconst normalized = raw.replace(/\\r\\n/g, '\\n').replace(/\\r/g, '\\n');\nconst blocks = normalized.split('\\n\\n').map((item) => item.trim()).filter(Boolean);\nlet parsedAnyBlock = false;\n\nfor (const block of blocks) {\n  const lines = block.split('\\n');\n  let eventType = '';\n  const dataLines = [];\n  for (const line of lines) {\n    const trimmed = line.trim();\n    if (!trimmed || trimmed.startsWith(':')) continue;\n    if (trimmed.startsWith('event:')) {\n      eventType = trimmed.slice(6).trim();\n      if (eventType) eventTypes.add(eventType);\n      if (eventType === 'response.output_item.done') hasOutputItemDone = true;\n      continue;\n    }\n    if (trimmed.startsWith('data:')) {\n      dataLines.push(trimmed.slice(5).trim());\n      continue;\n    }\n  }\n\n  if (dataLines.length > 0) {\n    parsedAnyBlock = true;\n    const merged = dataLines.join('\\n').trim();\n    if (merged && merged !== '[DONE]') {\n      try {\n        const payload = JSON.parse(merged);\n        if (eventType && (!payload.type || typeof payload.type !== 'string')) {\n          payload.type = eventType;\n        }\n        walk(payload);\n      } catch {\n        walk(merged);\n      }\n    }\n  }\n}\n\nif (!parsedAnyBlock) {\n  try {\n    walk(JSON.parse(normalized));\n  } catch {\n    walk(normalized);\n  }\n}\n\nconst outputText = outputTextChunks.join('\\n').slice(0, 6000);\nreturn [{\n  json: {\n    ok: images.length > 0,\n    status: images.length > 0 ? 'completed' : 'no_image',\n    imageCount: images.length,\n    images,\n    outputText,\n    eventTypes: Array.from(eventTypes),\n    hasOutputItemDone,\n    rawPreview: raw.slice(0, 12000),\n  },\n}];"
+      }
+    }
+  ],
+  "connections": {
+    "Webhook Generate Submit": {
+      "main": [
+        [
+          {
+            "node": "Prepare Generate Payload",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare Generate Payload": {
+      "main": [
+        [
+          {
+            "node": "Call ASXS Responses",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Call ASXS Responses": {
+      "main": [
+        [
+          {
+            "node": "Extract Images From SSE",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "versionId": "00000000-0000-4000-9000-000000000002"
+}

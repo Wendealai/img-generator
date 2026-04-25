@@ -1,0 +1,53 @@
+{
+  "name": "img-job-status",
+  "nodes": [
+    {
+      "id": "webhook_job_status",
+      "name": "Webhook Job Status",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        -450,
+        120
+      ],
+      "parameters": {
+        "path": "img-job-status",
+        "httpMethod": "POST",
+        "responseMode": "lastNode",
+        "options": {}
+      },
+      "webhookId": "img-job-status"
+    },
+    {
+      "id": "format_status_response",
+      "name": "Format Status Response",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -120,
+        120
+      ],
+      "parameters": {
+        "jsCode": "const body = ($json.body && typeof $json.body === 'object') ? $json.body : $json;\nconst jobId = String(body.jobId ?? body.job_id ?? '').trim();\nreturn [{\n  json: {\n    ok: false,\n    status: 'not_configured',\n    jobId,\n    message: 'Default template returns sync images from /webhook/img-generate-submit. Add datastore/queue if you need async status tracking.',\n  },\n}];"
+      }
+    }
+  ],
+  "connections": {
+    "Webhook Job Status": {
+      "main": [
+        [
+          {
+            "node": "Format Status Response",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "versionId": "00000000-0000-4000-9000-000000000003"
+}

@@ -12,6 +12,12 @@ export default defineConfig({
         secure: true,
         rewrite: (path) => path.replace(/^\/api-asxs/, ''),
       },
+      '/api-n8n': {
+        target: process.env.VITE_N8N_PROXY_TARGET || 'http://127.0.0.1:5678',
+        changeOrigin: true,
+        secure: false,
+        rewrite: (path) => path.replace(/^\/api-n8n/, ''),
+      },
     },
   },
   build: {

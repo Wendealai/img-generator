@@ -43,6 +43,7 @@ import './App.css'
 
 type Provider = 'openai' | 'gemini'
 type AuthMode = 'bearer' | 'query'
+type BackendMode = 'direct' | 'n8n'
 type StudioMode = 'text-to-image' | 'image-to-image'
 type RunPhase = 'idle' | 'testing' | 'running' | 'success' | 'error'
 type BatchMode = 'single' | 'prompt-list' | 'reroll'
@@ -54,6 +55,7 @@ type ErrorCategory = 'network' | 'auth' | 'quota' | 'server' | 'sse' | 'model' |
 type ImageDecision = 'keep' | 'discard' | 'unrated'
 
 interface ConnectionConfig {
+  backendMode: BackendMode
   provider: Provider
   authMode: AuthMode
   baseUrl: string
@@ -63,6 +65,11 @@ interface ConnectionConfig {
   openaiTextPath: string
   openaiEditPath: string
   geminiPathTemplate: string
+  n8nBaseUrl: string
+  n8nPromptOptimizePath: string
+  n8nGeneratePath: string
+  n8nStatusPath: string
+  n8nAuthToken: string
   extraHeaders: string
 }
 
@@ -346,7 +353,7 @@ const AUDIT_LOG_KEY = 'aurora-image-studio.audit.v1'
 const PUBLISH_KEY = 'aurora-image-studio.publish.v1'
 const TEMPLATE_BEST_KEY = 'aurora-image-studio.template-best.v1'
 
-const OPENAI_MODELS = ['gpt-5.4', 'gpt-5.2', 'gpt-5.4-mini']
+const OPENAI_MODELS = ['gpt-5.5', 'gpt-5.4', 'gpt-5.2', 'gpt-5.4-mini']
 const GEMINI_MODELS = ['nanobanana2']
 const MODEL_CAPABILITY_MATRIX = [
   {
@@ -362,7 +369,7 @@ const MODEL_CAPABILITY_MATRIX = [
     supports: '文生图, 图生图, 候选多图, prompt-list',
   },
   {
-    model: 'gpt-5.4 (outer)',
+    model: 'gpt-5.5 (outer)',
     provider: 'OpenAI',
     resolutions: '-',
     supports: '驱动 image_generation 工具, 路由与重试',
@@ -535,17 +542,29 @@ const SUPPORTED_IMAGE_INPUT_MIME_TYPES = new Set(['image/png', 'image/jpeg', 'im
 const ASXS_PROXY_BASE_URL = '/api-asxs/v1'
 const DIRECT_ASXS_BASE_URL = 'https://api.asxs.top/v1'
 const DEFAULT_OPENAI_BASE_URL = ASXS_PROXY_BASE_URL
+const DEFAULT_N8N_BASE_URL = '/api-n8n'
+const DEFAULT_N8N_PROMPT_OPTIMIZE_PATH = '/webhook/img-prompt-optimize'
+const DEFAULT_N8N_GENERATE_PATH = '/webhook/img-generate-submit'
+const DEFAULT_N8N_STATUS_PATH = '/webhook/img-job-status'
+const DEFAULT_N8N_POLL_INTERVAL_MS = 1800
+const DEFAULT_N8N_POLL_TIMEOUT_MS = 120000
 
 const DEFAULT_CONNECTION: ConnectionConfig = {
+  backendMode: 'direct',
   provider: 'openai',
   authMode: 'bearer',
   baseUrl: DEFAULT_OPENAI_BASE_URL,
   apiKey: '',
-  model: 'gpt-5.4',
+  model: 'gpt-5.5',
   modelsPath: '/models',
   openaiTextPath: '/responses',
   openaiEditPath: '/responses',
   geminiPathTemplate: '/v1beta/models/{model}:generateContent',
+  n8nBaseUrl: DEFAULT_N8N_BASE_URL,
+  n8nPromptOptimizePath: DEFAULT_N8N_PROMPT_OPTIMIZE_PATH,
+  n8nGeneratePath: DEFAULT_N8N_GENERATE_PATH,
+  n8nStatusPath: DEFAULT_N8N_STATUS_PATH,
+  n8nAuthToken: '',
   extraHeaders: '',
 }
 
@@ -744,7 +763,31 @@ function resolveRuntimeBaseUrl(baseUrl: string): string {
   return trimmed
 }
 
+function normalizeWebhookPath(path: string, fallback: string): string {
+  const trimmed = path.trim()
+  if (!trimmed) {
+    return fallback
+  }
+  if (/^https?:\/\//i.test(trimmed)) {
+    return trimmed
+  }
+  return trimmed.startsWith('/') ? trimmed : `/${trimmed}`
+}
+
 function normalizeConnectionDefaults(connection: ConnectionConfig): ConnectionConfig {
+  if (connection.backendMode === 'n8n') {
+    return {
+      ...connection,
+      n8nBaseUrl: connection.n8nBaseUrl.trim() || DEFAULT_N8N_BASE_URL,
+      n8nPromptOptimizePath: normalizeWebhookPath(
+        connection.n8nPromptOptimizePath,
+        DEFAULT_N8N_PROMPT_OPTIMIZE_PATH,
+      ),
+      n8nGeneratePath: normalizeWebhookPath(connection.n8nGeneratePath, DEFAULT_N8N_GENERATE_PATH),
+      n8nStatusPath: normalizeWebhookPath(connection.n8nStatusPath, DEFAULT_N8N_STATUS_PATH),
+    }
+  }
+
   const normalizedBase = connection.baseUrl.trim()
   const normalizedModelsPath = connection.modelsPath.trim()
   const normalizedOpenaiTextPath = connection.openaiTextPath.trim()
@@ -1827,6 +1870,49 @@ function withQueryParam(url: string, key: string, value: string): string {
   }
 }
 
+function buildN8nWebhookUrl(baseUrl: string, path: string): string {
+  const normalizedPath = normalizeWebhookPath(path, DEFAULT_N8N_GENERATE_PATH)
+  return buildUrl(baseUrl.trim() || DEFAULT_N8N_BASE_URL, normalizedPath)
+}
+
+function buildN8nHeaders(connection: ConnectionConfig): Record<string, string> {
+  const headers: Record<string, string> = {
+    ...parseExtraHeaders(connection.extraHeaders),
+    'Content-Type': 'application/json',
+  }
+  const token = connection.n8nAuthToken.trim()
+  if (token) {
+    if (!headers.Authorization) {
+      headers.Authorization = `Bearer ${token}`
+    }
+    if (!headers['X-N8N-Token']) {
+      headers['X-N8N-Token'] = token
+    }
+  }
+  return headers
+}
+
+function readStringByPath(payload: unknown, path: string[]): string {
+  let cursor: unknown = payload
+  for (const segment of path) {
+    if (!isRecord(cursor)) {
+      return ''
+    }
+    cursor = cursor[segment]
+  }
+  return typeof cursor === 'string' ? cursor.trim() : ''
+}
+
+function pickStringFromPaths(payload: unknown, paths: string[][]): string {
+  for (const path of paths) {
+    const value = readStringByPath(payload, path)
+    if (value) {
+      return value
+    }
+  }
+  return ''
+}
+
 function looksLikeImageUrl(text: string): boolean {
   if (text.startsWith('data:image/')) {
     return true
@@ -2345,7 +2431,7 @@ function extractImages(payload: unknown): StudioImage[] {
       }
     }
 
-    const base64Keys = ['b64_json', 'b64', 'image_base64', 'base64']
+    const base64Keys = ['b64_json', 'b64', 'image_base64', 'imageBase64', 'base64', 'image']
     for (const key of base64Keys) {
       const value = node[key]
       if (typeof value === 'string' && value.length > 40) {
@@ -2358,6 +2444,104 @@ function extractImages(payload: unknown): StudioImage[] {
 
   walk(payload)
   return Array.from(images.values())
+}
+
+function extractN8nJobId(payload: unknown): string {
+  return pickStringFromPaths(payload, [
+    ['jobId'],
+    ['job_id'],
+    ['id'],
+    ['data', 'jobId'],
+    ['data', 'job_id'],
+    ['result', 'jobId'],
+    ['result', 'job_id'],
+  ])
+}
+
+function extractN8nJobStatus(payload: unknown): string {
+  return pickStringFromPaths(payload, [
+    ['status'],
+    ['state'],
+    ['jobStatus'],
+    ['data', 'status'],
+    ['data', 'state'],
+    ['result', 'status'],
+    ['result', 'state'],
+  ])
+}
+
+function extractN8nMessage(payload: unknown): string {
+  const direct = pickStringFromPaths(payload, [
+    ['message'],
+    ['error'],
+    ['data', 'message'],
+    ['data', 'error'],
+    ['result', 'message'],
+    ['result', 'error'],
+  ])
+  return direct || extractText(payload)
+}
+
+async function pollN8nJobUntilDone(
+  endpoint: string,
+  headers: Record<string, string>,
+  jobId: string,
+  signal: AbortSignal,
+  intervalMs = DEFAULT_N8N_POLL_INTERVAL_MS,
+  timeoutMs = DEFAULT_N8N_POLL_TIMEOUT_MS,
+): Promise<{ images: StudioImage[]; outputText: string; raw: string; attempts: number; status: string }> {
+  const startedAt = Date.now()
+  let attempts = 0
+  let lastRaw = ''
+  let lastStatus = 'pending'
+
+  while (Date.now() - startedAt < timeoutMs) {
+    if (signal.aborted) {
+      throw new DOMException('Aborted', 'AbortError')
+    }
+
+    attempts += 1
+    const response = await fetch(endpoint, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({ jobId }),
+      signal,
+    })
+    const raw = await response.text()
+    lastRaw = raw.slice(0, 200000)
+    const payload = safeJsonParse(raw)
+
+    if (!response.ok) {
+      throw new Error(extractError(payload, response.status))
+    }
+
+    const images = extractImages(payload)
+    const outputText = extractText(payload)
+    const status = extractN8nJobStatus(payload).toLowerCase() || (images.length > 0 ? 'completed' : 'pending')
+    lastStatus = status
+
+    if (images.length > 0) {
+      return {
+        images,
+        outputText,
+        raw: lastRaw,
+        attempts,
+        status,
+      }
+    }
+
+    if (/fail|error|cancel|timeout/.test(status)) {
+      const detail = extractN8nMessage(payload) || `任务状态异常：${status}`
+      throw new Error(detail)
+    }
+    if (/done|success|complete/.test(status)) {
+      throw new Error('任务已结束，但未返回可用图片数据')
+    }
+
+    await sleep(Math.max(400, intervalMs))
+  }
+
+  throw new Error(`状态轮询超时（>${Math.round(timeoutMs / 1000)}s，最后状态：${lastStatus}）`)
 }
 
 function extractError(payload: unknown, status: number): string {
@@ -2675,6 +2859,67 @@ async function prepareRequest(
   const prompt = composePrompt(mergedGeneration, mode, source, options?.maskEditor)
   const runtimeBaseUrl = resolveRuntimeBaseUrl(options?.baseUrlOverride ?? connection.baseUrl)
   const requestedModel = (modelOverride ?? connection.model).trim()
+
+  if (connection.backendMode === 'n8n') {
+    const endpoint = buildN8nWebhookUrl(
+      options?.baseUrlOverride ?? connection.n8nBaseUrl,
+      connection.n8nGeneratePath,
+    )
+    const headers = buildN8nHeaders(connection)
+    const payload: Record<string, unknown> = {
+      requestId: crypto.randomUUID(),
+      mode,
+      provider: connection.provider,
+      model: requestedModel || 'gpt-5.5',
+      toolModel: OPENAI_IMAGE_TOOL_MODEL,
+      prompt,
+      promptRaw: mergedGeneration.prompt.trim(),
+      negativePrompt: mergedGeneration.negativePrompt.trim(),
+      stream: true,
+      generation: {
+        resolution: mergedGeneration.resolution,
+        aspectRatio: mergedGeneration.aspectRatio,
+        imageCount: mergedGeneration.imageCount,
+        quality: mergedGeneration.quality,
+        outputFormat: mergedGeneration.outputFormat,
+        background: mergedGeneration.background,
+        style: mergedGeneration.style,
+        temperature: mergedGeneration.temperature,
+        seed: mergedGeneration.seed,
+        strength: Number(mergedGeneration.strength.toFixed(2)),
+      },
+    }
+
+    if (mode === 'image-to-image') {
+      if (source.file) {
+        const optimizedInput = await optimizeImageForModelInput(source.file)
+        payload.source = {
+          type: 'file-base64',
+          mimeType: optimizedInput.mimeType,
+          imageBase64: optimizedInput.base64,
+          imageUrl: source.imageUrl.trim() || undefined,
+        }
+      } else if (source.imageUrl.trim()) {
+        payload.source = {
+          type: 'url',
+          imageUrl: source.imageUrl.trim(),
+        }
+      } else {
+        throw new Error('图生图模式至少需要上传一张参考图或填写参考图 URL')
+      }
+    }
+
+    const requestPreview = JSON.stringify(payload, null, 2)
+    return {
+      endpoint,
+      requestPreview,
+      init: {
+        method: 'POST',
+        headers,
+        body: requestPreview,
+      },
+    }
+  }
 
   if (connection.provider === 'openai') {
     const endpointPath = mode === 'text-to-image' ? connection.openaiTextPath : connection.openaiEditPath
@@ -3012,6 +3257,7 @@ function App() {
   const [history, setHistory] = useState<HistoryRecord[]>(() => readStoredHistory())
   const [isGenerating, setIsGenerating] = useState(false)
   const [isTesting, setIsTesting] = useState(false)
+  const [isOptimizingPrompt, setIsOptimizingPrompt] = useState(false)
   const [previewImage, setPreviewImage] = useState<StudioImage | null>(null)
 
   const abortRef = useRef<AbortController | null>(null)
@@ -3121,24 +3367,37 @@ function App() {
     }
     let cancelled = false
     const probe = async () => {
-      const urls = [connection.baseUrl, ...normalizeUrlLines(runtimeConfig.fallbackBaseUrls)].filter(
-        (item, index, list) => item.trim() && list.indexOf(item) === index,
-      )
+      const urls = (
+        connection.backendMode === 'n8n'
+          ? [connection.n8nBaseUrl]
+          : [connection.baseUrl, ...normalizeUrlLines(runtimeConfig.fallbackBaseUrls)]
+      ).filter((item, index, list) => item.trim() && list.indexOf(item) === index)
       if (urls.length === 0) {
         return
       }
       const results: EndpointHealth[] = []
       for (const base of urls) {
-        const endpoint = buildUrl(resolveRuntimeBaseUrl(base), connection.modelsPath || '/models')
-        const headers: Record<string, string> = parseExtraHeaders(connection.extraHeaders)
-        if (connection.authMode === 'bearer' && connection.apiKey.trim()) {
+        const endpoint =
+          connection.backendMode === 'n8n'
+            ? buildN8nWebhookUrl(base, connection.n8nStatusPath)
+            : buildUrl(resolveRuntimeBaseUrl(base), connection.modelsPath || '/models')
+        const headers: Record<string, string> =
+          connection.backendMode === 'n8n'
+            ? buildN8nHeaders(connection)
+            : parseExtraHeaders(connection.extraHeaders)
+        if (
+          connection.backendMode !== 'n8n' &&
+          connection.authMode === 'bearer' &&
+          connection.apiKey.trim()
+        ) {
           headers.Authorization = `Bearer ${connection.apiKey.trim()}`
         }
         const started = performance.now()
         try {
           const response = await fetch(endpoint, {
-            method: 'GET',
+            method: connection.backendMode === 'n8n' ? 'POST' : 'GET',
             headers,
+            body: connection.backendMode === 'n8n' ? JSON.stringify({ jobId: 'probe' }) : undefined,
           })
           const latency = Math.round(performance.now() - started)
           results.push({
@@ -3171,11 +3430,16 @@ function App() {
       window.clearInterval(timer)
     }
   }, [
+    connection,
     connection.apiKey,
     connection.authMode,
     connection.baseUrl,
+    connection.backendMode,
     connection.extraHeaders,
     connection.modelsPath,
+    connection.n8nAuthToken,
+    connection.n8nBaseUrl,
+    connection.n8nStatusPath,
     runtimeConfig.endpointProbeEnabled,
     runtimeConfig.endpointProbeIntervalSec,
     runtimeConfig.fallbackBaseUrls,
@@ -3223,10 +3487,12 @@ function App() {
     }
   }, [images, imageHashMap, runtimeConfig.similarityThreshold])
 
-  const providerModelOptions = useMemo(
-    () => (connection.provider === 'openai' ? OPENAI_MODELS : GEMINI_MODELS),
-    [connection.provider],
-  )
+  const providerModelOptions = useMemo(() => {
+    if (connection.backendMode === 'n8n') {
+      return ['gpt-5.5', 'gpt-5.4', 'gpt-5.4-mini']
+    }
+    return connection.provider === 'openai' ? OPENAI_MODELS : GEMINI_MODELS
+  }, [connection.backendMode, connection.provider])
 
   const batchQueuePreview = useMemo(
     () => buildBatchPromptQueue(batchConfig, generation.prompt),
@@ -3256,6 +3522,12 @@ function App() {
   }, [batchConfig.mode, batchQueuePreview.length, isGenerating])
 
   const endpointPreview = useMemo(() => {
+    if (connection.backendMode === 'n8n') {
+      if (!connection.n8nBaseUrl.trim()) {
+        return '请先填写 n8n Base URL'
+      }
+      return buildN8nWebhookUrl(connection.n8nBaseUrl, connection.n8nGeneratePath)
+    }
     if (!connection.baseUrl.trim()) {
       return '请先填写 Base URL'
     }
@@ -3722,7 +3994,7 @@ function App() {
     if (!profile) {
       return
     }
-    setConnection(profile.connection)
+    setConnection(normalizeConnectionDefaults(profile.connection))
     setGeneration(profile.generation)
     setBatchConfig(profile.batch)
     messageApi.success(`已切换到空间：${profile.name}`)
@@ -3913,6 +4185,111 @@ function App() {
     }))
     addAuditLog('prompt.translate', `提示词翻译到 ${target}`)
     messageApi.success(target === 'en' ? '已转换为英文提示词' : '已转换为中文提示词')
+  }
+
+  const handleOptimizePrompt = async () => {
+    const rawPrompt = generation.prompt.trim()
+    if (!rawPrompt) {
+      messageApi.error('请先输入提示词，再执行优化')
+      return
+    }
+    if (connection.backendMode !== 'n8n') {
+      messageApi.warning('提示词优化按钮当前走 n8n 工作流，请先切换后端模式为 n8n')
+      return
+    }
+    if (!connection.n8nBaseUrl.trim()) {
+      messageApi.error('请先填写 n8n Base URL')
+      return
+    }
+
+    setIsOptimizingPrompt(true)
+    const endpoint = buildN8nWebhookUrl(connection.n8nBaseUrl, connection.n8nPromptOptimizePath)
+    const headers = buildN8nHeaders(connection)
+    try {
+      setRunState({
+        phase: 'testing',
+        message: '正在调用 n8n 提示词优化...',
+        endpoint,
+      })
+
+      const response = await fetch(endpoint, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({
+          prompt: rawPrompt,
+          negativePrompt: generation.negativePrompt.trim(),
+          mode,
+          provider: connection.provider,
+          model: connection.model.trim() || 'gpt-5.5',
+          generation: {
+            resolution: generation.resolution,
+            style: generation.style,
+            quality: generation.quality,
+            aspectRatio: generation.aspectRatio,
+          },
+        }),
+      })
+
+      const raw = await response.text()
+      const payload = safeJsonParse(raw)
+      setRawResponse(typeof payload === 'string' ? payload : JSON.stringify(payload, null, 2))
+
+      if (!response.ok) {
+        throw new Error(extractError(payload, response.status))
+      }
+
+      const optimizedPrompt =
+        pickStringFromPaths(payload, [
+          ['optimizedPrompt'],
+          ['optimized_prompt'],
+          ['rewritePrompt'],
+          ['prompt'],
+          ['data', 'optimizedPrompt'],
+          ['data', 'optimized_prompt'],
+          ['data', 'prompt'],
+          ['result', 'optimizedPrompt'],
+          ['result', 'optimized_prompt'],
+          ['result', 'prompt'],
+        ]) || extractText(payload)
+      const optimizedNegative = pickStringFromPaths(payload, [
+        ['negativePrompt'],
+        ['negative_prompt'],
+        ['data', 'negativePrompt'],
+        ['data', 'negative_prompt'],
+        ['result', 'negativePrompt'],
+        ['result', 'negative_prompt'],
+      ])
+
+      if (!optimizedPrompt.trim()) {
+        throw new Error('优化接口返回成功，但未提取到可用优化提示词')
+      }
+
+      setGeneration((previous) => ({
+        ...previous,
+        prompt: optimizedPrompt.trim(),
+        negativePrompt: optimizedNegative.trim() || previous.negativePrompt,
+      }))
+      setResponseText(extractN8nMessage(payload) || '提示词优化完成')
+      setRunState({
+        phase: 'success',
+        message: `提示词优化完成（${response.status}）`,
+        endpoint,
+        statusCode: response.status,
+      })
+      addAuditLog('prompt.optimize.success', endpoint)
+      messageApi.success('提示词优化完成')
+    } catch (error) {
+      const reason = error instanceof Error ? error.message : '未知错误'
+      setRunState({
+        phase: 'error',
+        message: `提示词优化失败：${reason}`,
+        endpoint,
+      })
+      addAuditLog('prompt.optimize.error', reason)
+      messageApi.error(`提示词优化失败：${reason}`)
+    } finally {
+      setIsOptimizingPrompt(false)
+    }
   }
 
   const addDiagnostic = (input: Omit<ErrorDiagnostic, 'id' | 'at'>) => {
@@ -4281,7 +4658,7 @@ function App() {
       ...previous,
       provider: nextProvider,
       authMode: nextProvider === 'openai' ? 'bearer' : previous.authMode,
-      model: nextProvider === 'openai' ? 'gpt-5.4' : 'nanobanana2',
+      model: nextProvider === 'openai' ? 'gpt-5.5' : 'nanobanana2',
     }))
   }
 
@@ -4345,13 +4722,24 @@ function App() {
   }
 
   const handleGenerate = async () => {
-    if (!connection.baseUrl.trim()) {
-      messageApi.error('请先填写 Base URL')
-      return
-    }
-    if (!connection.apiKey.trim()) {
-      messageApi.error('请先填写 API Key')
-      return
+    if (connection.backendMode === 'n8n') {
+      if (!connection.n8nBaseUrl.trim()) {
+        messageApi.error('请先填写 n8n Base URL')
+        return
+      }
+      if (!connection.n8nGeneratePath.trim()) {
+        messageApi.error('请先填写 n8n 生图路径')
+        return
+      }
+    } else {
+      if (!connection.baseUrl.trim()) {
+        messageApi.error('请先填写 Base URL')
+        return
+      }
+      if (!connection.apiKey.trim()) {
+        messageApi.error('请先填写 API Key')
+        return
+      }
     }
     if (!connection.model.trim()) {
       messageApi.error('请先填写模型名称')
@@ -4445,10 +4833,11 @@ function App() {
       return
     }
 
-    const baseCandidatesRaw = [
-      connection.baseUrl,
-      ...normalizeUrlLines(runtimeConfig.fallbackBaseUrls),
-    ].filter((item, index, list) => item.trim() && list.indexOf(item) === index)
+    const baseCandidatesRaw = (
+      connection.backendMode === 'n8n'
+        ? [connection.n8nBaseUrl]
+        : [connection.baseUrl, ...normalizeUrlLines(runtimeConfig.fallbackBaseUrls)]
+    ).filter((item, index, list) => item.trim() && list.indexOf(item) === index)
     const baseCandidates = runtimeConfig.autoSelectBestEndpoint
       ? [...baseCandidatesRaw].sort((a, b) => {
           const healthA = endpointHealth.find((item) => item.url === a)
@@ -4589,7 +4978,10 @@ function App() {
         const taskPrompt = job.prompt
         attemptedPrompt = taskPrompt
         const taskIndex = (jobIndexMap.get(job.id) ?? 0) + 1
-        const modelCandidates = buildModelCandidates(connection.provider, connection.model)
+        const modelCandidates =
+          connection.backendMode === 'n8n'
+            ? [connection.model.trim() || 'gpt-5.5']
+            : buildModelCandidates(connection.provider, connection.model)
         let taskSucceeded = false
         let taskFailureMessage = ''
         let taskFailureEndpoint = ''
@@ -4813,6 +5205,7 @@ function App() {
               let nextImages: StudioImage[] = []
               let outputText = ''
               let raw = ''
+              let responsePayload: unknown = null
               let streamEventTypes: string[] = []
               let streamHasOutputItemDone = false
 
@@ -4828,11 +5221,40 @@ function App() {
               } else {
                 raw = await response.text()
                 const payload = safeJsonParse(raw)
+                responsePayload = payload
                 setRawResponse(
                   typeof payload === 'string' ? payload : JSON.stringify(payload, null, 2),
                 )
                 nextImages = extractImages(payload)
                 outputText = extractText(payload)
+              }
+
+              if (!shouldParseSse && connection.backendMode === 'n8n' && nextImages.length === 0) {
+                const jobId = extractN8nJobId(responsePayload)
+                if (jobId) {
+                  const statusEndpoint = buildN8nWebhookUrl(connection.n8nBaseUrl, connection.n8nStatusPath)
+                  const statusHeaders = buildN8nHeaders(connection)
+                  setRunState({
+                    phase: 'running',
+                    message: `任务已提交（jobId: ${jobId}），等待 n8n 状态回传...`,
+                    endpoint: statusEndpoint,
+                  })
+                  const pollResult = await pollN8nJobUntilDone(
+                    statusEndpoint,
+                    statusHeaders,
+                    jobId,
+                    controller.signal,
+                  )
+                  nextImages = pollResult.images
+                  if (!outputText) {
+                    outputText = pollResult.outputText
+                  }
+                  raw = `${raw}\n\n[n8n status poll attempts=${pollResult.attempts}, status=${pollResult.status}]\n${pollResult.raw}`.slice(
+                    0,
+                    200000,
+                  )
+                  setRawResponse(raw)
+                }
               }
 
               if (nextImages.length === 0) {
@@ -4846,7 +5268,9 @@ function App() {
                     : `接口返回成功，但未检测到 response.output_item.done。事件类型：${recentEventTypes}；content-type: ${
                         responseContentType || 'unknown'
                       }`
-                  : '接口返回成功，但未识别到图片数据。请检查 SSE 事件中是否包含 response.output_item.done。'
+                  : connection.backendMode === 'n8n'
+                    ? 'n8n 已返回成功响应，但未提取到图片数据。请检查 n8n 工作流提取节点输出（images/base64/jobId）。'
+                    : '接口返回成功，但未识别到图片数据。请检查 SSE 事件中是否包含 response.output_item.done。'
 
                 const classified = classifyFailure(response.status, taskFailureMessage)
                 addDiagnostic({
@@ -5062,7 +5486,9 @@ function App() {
       const readableMessage = isAbortError
         ? '任务已取消'
         : isNetworkError
-          ? `网络请求失败：${attemptedEndpoint || '未知 endpoint'}。请优先使用 /api-asxs/v1，同域代理可绕过跨域限制。原始错误：${failureMessage}`
+          ? connection.backendMode === 'n8n'
+            ? `网络请求失败：${attemptedEndpoint || '未知 endpoint'}。请检查 n8n 服务可达性与 webhook 路径。原始错误：${failureMessage}`
+            : `网络请求失败：${attemptedEndpoint || '未知 endpoint'}。请优先使用 /api-asxs/v1，同域代理可绕过跨域限制。原始错误：${failureMessage}`
           : failureMessage
 
       setRunState({
@@ -5167,13 +5593,24 @@ function App() {
   }, [isGenerating])
 
   const handleTestConnection = async () => {
-    if (!connection.baseUrl.trim()) {
-      messageApi.error('请先填写 Base URL')
-      return
-    }
-    if (!connection.apiKey.trim()) {
-      messageApi.error('请先填写 API Key')
-      return
+    if (connection.backendMode === 'n8n') {
+      if (!connection.n8nBaseUrl.trim()) {
+        messageApi.error('请先填写 n8n Base URL')
+        return
+      }
+      if (!connection.n8nPromptOptimizePath.trim()) {
+        messageApi.error('请先填写 n8n 提示词优化路径')
+        return
+      }
+    } else {
+      if (!connection.baseUrl.trim()) {
+        messageApi.error('请先填写 Base URL')
+        return
+      }
+      if (!connection.apiKey.trim()) {
+        messageApi.error('请先填写 API Key')
+        return
+      }
     }
 
     setIsTesting(true)
@@ -5183,26 +5620,68 @@ function App() {
       endpoint: '',
     })
 
-    const rawBaseUrl = connection.baseUrl.trim()
-    const baseUrl = resolveRuntimeBaseUrl(rawBaseUrl)
-    const testPath = connection.modelsPath.replace('{model}', connection.model).trim()
-    const primaryEndpoint =
-      isResponsesEndpoint(baseUrl) && !isResponsesEndpoint(testPath)
-        ? baseUrl
-        : buildUrl(baseUrl, testPath)
-    const fallbackEndpoint = isResponsesEndpoint(primaryEndpoint)
-      ? ''
-      : buildUrl(baseUrl, '/responses')
-    const probeCandidates = [primaryEndpoint, fallbackEndpoint].filter(
-      (candidate, index, all) => candidate && all.indexOf(candidate) === index,
-    )
-    const headers: Record<string, string> = parseExtraHeaders(connection.extraHeaders)
-
     const controller = new AbortController()
     const timer = window.setTimeout(() => controller.abort(), 12000)
     const startedAt = performance.now()
+    let failedEndpoint = ''
 
     try {
+      if (connection.backendMode === 'n8n') {
+        const endpoint = buildN8nWebhookUrl(connection.n8nBaseUrl, connection.n8nPromptOptimizePath)
+        const headers = buildN8nHeaders(connection)
+        failedEndpoint = endpoint
+        const response = await fetch(endpoint, {
+          method: 'POST',
+          headers,
+          signal: controller.signal,
+          body: JSON.stringify({
+            prompt: '连接测试 ping',
+            mode: 'text-to-image',
+            model: connection.model.trim() || 'gpt-5.5',
+            dryRun: true,
+          }),
+        })
+        const raw = await response.text()
+        const latencyMs = Math.round(performance.now() - startedAt)
+        const info = response.ok
+          ? `n8n 连接成功（${response.status}）`
+          : response.status >= 500
+            ? `n8n 可达（HTTP ${response.status}，服务端返回异常）`
+            : `n8n 可达（HTTP ${response.status}，鉴权或参数待修正）`
+        setRunState({
+          phase: response.ok ? 'success' : 'error',
+          message: `${info} · ${latencyMs}ms`,
+          endpoint,
+          statusCode: response.status,
+          latencyMs,
+        })
+        setResponseText(raw.slice(0, 6000) || info)
+        if (response.ok) {
+          addAuditLog('connection.test.success', `${endpoint} -> ${response.status}`)
+          messageApi.success(info)
+        } else {
+          addAuditLog('connection.test.warn', `${endpoint} -> ${response.status}`)
+          messageApi.warning(info)
+        }
+        return
+      }
+
+      const rawBaseUrl = connection.baseUrl.trim()
+      const baseUrl = resolveRuntimeBaseUrl(rawBaseUrl)
+      const testPath = connection.modelsPath.replace('{model}', connection.model).trim()
+      const primaryEndpoint =
+        isResponsesEndpoint(baseUrl) && !isResponsesEndpoint(testPath)
+          ? baseUrl
+          : buildUrl(baseUrl, testPath)
+      failedEndpoint = primaryEndpoint
+      const fallbackEndpoint = isResponsesEndpoint(primaryEndpoint)
+        ? ''
+        : buildUrl(baseUrl, '/responses')
+      const probeCandidates = [primaryEndpoint, fallbackEndpoint].filter(
+        (candidate, index, all) => candidate && all.indexOf(candidate) === index,
+      )
+      const headers: Record<string, string> = parseExtraHeaders(connection.extraHeaders)
+
       let matchedEndpoint = ''
       let matchedResponse: Response | null = null
       let matchedPreview = ''
@@ -5227,7 +5706,7 @@ function App() {
                   : {}),
               },
               body: JSON.stringify({
-                model: connection.model.trim() || 'gpt-5.4',
+                model: connection.model.trim() || 'gpt-5.5',
                 stream: true,
                 input: 'ping',
                 tool_choice: {
@@ -5286,6 +5765,7 @@ function App() {
           probeErrors.length > 0 ? probeErrors.join('\n') : '当前配置下未探测到可达接口',
         )
       }
+      failedEndpoint = matchedEndpoint || primaryEndpoint
 
       const latencyMs = Math.round(performance.now() - startedAt)
       const reachable = true
@@ -5359,14 +5839,16 @@ function App() {
       const detail = error instanceof Error ? error.message : '未知错误'
       const text = isAbortError
         ? '连接测试超时'
-        : '连接测试失败（已尝试代理与直连）'
+        : connection.backendMode === 'n8n'
+          ? 'n8n 连接测试失败'
+          : '连接测试失败（已尝试代理与直连）'
       setRunState({
         phase: 'error',
         message: text,
-        endpoint: primaryEndpoint,
+        endpoint: failedEndpoint,
       })
       setResponseText(`${text}\n${detail}`)
-      addAuditLog('connection.test.error', `${primaryEndpoint} -> ${detail}`)
+      addAuditLog('connection.test.error', `${failedEndpoint || 'unknown'} -> ${detail}`)
       messageApi.error(text)
     } finally {
       window.clearTimeout(timer)
@@ -5675,6 +6157,14 @@ function App() {
 
           <Text className="field-label">提示词</Text>
           <Space wrap size={8}>
+            <Button
+              size="small"
+              type="primary"
+              loading={isOptimizingPrompt}
+              onClick={() => void handleOptimizePrompt()}
+            >
+              提示词优化（n8n）
+            </Button>
             <Button size="small" onClick={applySmartRecommendation}>
               智能参数推荐
             </Button>
@@ -5923,7 +6413,7 @@ function App() {
           <Tag color="gold">Dual Engine Studio</Tag>
           <Title level={1}>Aurora Image Forge</Title>
           <Paragraph>
-            面向生产场景的生图前端，OpenAI 侧采用 <Text code>gpt-5.4</Text> 驱动
+            面向生产场景的生图前端，OpenAI 侧采用 <Text code>gpt-5.5</Text> 驱动
             <Text code>image_generation(model: gpt-image-2)</Text>，并集成 Gemini
             <Text code>nanobanana2</Text>，支持文生图、图生图、参数调优、历史追溯与请求调试。
           </Paragraph>
@@ -5946,7 +6436,13 @@ function App() {
         <div className="hero-metrics">
           <div className="metric-item">
             <span>当前引擎</span>
-            <strong>{connection.provider === 'openai' ? 'ChatGPT' : 'Gemini'}</strong>
+            <strong>
+              {connection.backendMode === 'n8n'
+                ? `n8n 编排 · ${connection.provider === 'openai' ? 'ChatGPT' : 'Gemini'}`
+                : connection.provider === 'openai'
+                  ? 'ChatGPT'
+                  : 'Gemini'}
+            </strong>
           </div>
           <div className="metric-item">
             <span>当前模型</span>
@@ -6014,6 +6510,24 @@ function App() {
             }
           >
             <div className="field-grid">
+              <div className="field-block full-width">
+                <Text className="field-label">后端模式</Text>
+                <Segmented
+                  block
+                  value={connection.backendMode}
+                  options={[
+                    { label: '直连 API', value: 'direct' },
+                    { label: 'n8n 编排', value: 'n8n' },
+                  ]}
+                  onChange={(value) =>
+                    setConnection((previous) => ({
+                      ...previous,
+                      backendMode: value === 'n8n' ? 'n8n' : 'direct',
+                    }))
+                  }
+                />
+              </div>
+
               <div className="field-block">
                 <Text className="field-label">服务商</Text>
                 <Segmented
@@ -6027,51 +6541,85 @@ function App() {
                 />
               </div>
 
-              <div className="field-block">
-                <Text className="field-label">鉴权方式</Text>
-                <Segmented
-                  block
-                  value={connection.authMode}
-                  options={[
-                    { label: 'Bearer', value: 'bearer' },
-                    { label: 'Query Key', value: 'query' },
-                  ]}
-                  onChange={(value) =>
-                    setConnection((previous) => ({
-                      ...previous,
-                      authMode: value === 'query' ? 'query' : 'bearer',
-                    }))
-                  }
-                />
-              </div>
+              {connection.backendMode === 'direct' ? (
+                <div className="field-block">
+                  <Text className="field-label">鉴权方式</Text>
+                  <Segmented
+                    block
+                    value={connection.authMode}
+                    options={[
+                      { label: 'Bearer', value: 'bearer' },
+                      { label: 'Query Key', value: 'query' },
+                    ]}
+                    onChange={(value) =>
+                      setConnection((previous) => ({
+                        ...previous,
+                        authMode: value === 'query' ? 'query' : 'bearer',
+                      }))
+                    }
+                  />
+                </div>
+              ) : (
+                <div className="field-block">
+                  <Text className="field-label">n8n 鉴权 Token（可选）</Text>
+                  <Input.Password
+                    value={connection.n8nAuthToken}
+                    onChange={(event) =>
+                      setConnection((previous) => ({
+                        ...previous,
+                        n8nAuthToken: event.target.value,
+                      }))
+                    }
+                    placeholder="Bearer token（如已在 n8n 内部鉴权可留空）"
+                  />
+                </div>
+              )}
 
-              <div className="field-block full-width">
-                <Text className="field-label">Base URL</Text>
-                <Input
-                  value={connection.baseUrl}
-                  onChange={(event) =>
-                    setConnection((previous) => ({
-                      ...previous,
-                      baseUrl: event.target.value,
-                    }))
-                  }
-                  placeholder="/api-asxs/v1 (推荐，同域代理)"
-                />
-              </div>
+              {connection.backendMode === 'direct' ? (
+                <>
+                  <div className="field-block full-width">
+                    <Text className="field-label">Base URL</Text>
+                    <Input
+                      value={connection.baseUrl}
+                      onChange={(event) =>
+                        setConnection((previous) => ({
+                          ...previous,
+                          baseUrl: event.target.value,
+                        }))
+                      }
+                      placeholder="/api-asxs/v1 (推荐，同域代理)"
+                    />
+                  </div>
 
-              <div className="field-block full-width">
-                <Text className="field-label">API Key</Text>
-                <Input.Password
-                  value={connection.apiKey}
-                  onChange={(event) =>
-                    setConnection((previous) => ({
-                      ...previous,
-                      apiKey: event.target.value,
-                    }))
-                  }
-                  placeholder="输入 API Key"
-                />
-              </div>
+                  <div className="field-block full-width">
+                    <Text className="field-label">API Key</Text>
+                    <Input.Password
+                      value={connection.apiKey}
+                      onChange={(event) =>
+                        setConnection((previous) => ({
+                          ...previous,
+                          apiKey: event.target.value,
+                        }))
+                      }
+                      placeholder="输入 API Key"
+                    />
+                  </div>
+                </>
+              ) : (
+                <div className="field-block full-width">
+                  <Text className="field-label">n8n Base URL</Text>
+                    <Input
+                      value={connection.n8nBaseUrl}
+                      onChange={(event) =>
+                        setConnection((previous) => ({
+                          ...previous,
+                          n8nBaseUrl: event.target.value,
+                        }))
+                      }
+                    placeholder="https://n8n.your-domain.com 或 /api-n8n"
+                    />
+                  </div>
+              )}
 
               <div className="field-block full-width">
                 <Text className="field-label">模型</Text>
@@ -6122,65 +6670,113 @@ function App() {
                   ghost
                   items={[
                     {
-                      key: 'advanced-routes',
-                      label: '高级路径与请求头',
+                      key: connection.backendMode === 'n8n' ? 'advanced-n8n-routes' : 'advanced-routes',
+                      label: connection.backendMode === 'n8n' ? 'n8n 路径与请求头' : '高级路径与请求头',
                       children: (
                         <div className="field-grid advanced-grid">
-                          <div className="field-block">
-                            <Text className="field-label">模型探测路径</Text>
-                            <Input
-                              value={connection.modelsPath}
-                              onChange={(event) =>
-                                setConnection((previous) => ({
-                                  ...previous,
-                                  modelsPath: event.target.value,
-                                }))
-                              }
-                              placeholder="/models"
-                            />
-                          </div>
+                          {connection.backendMode === 'direct' ? (
+                            <>
+                              <div className="field-block">
+                                <Text className="field-label">模型探测路径</Text>
+                                <Input
+                                  value={connection.modelsPath}
+                                  onChange={(event) =>
+                                    setConnection((previous) => ({
+                                      ...previous,
+                                      modelsPath: event.target.value,
+                                    }))
+                                  }
+                                  placeholder="/models"
+                                />
+                              </div>
 
-                          <div className="field-block">
-                            <Text className="field-label">OpenAI 文生图路径</Text>
-                            <Input
-                              value={connection.openaiTextPath}
-                              onChange={(event) =>
-                                setConnection((previous) => ({
-                                  ...previous,
-                                  openaiTextPath: event.target.value,
-                                }))
-                              }
-                              placeholder="/responses"
-                            />
-                          </div>
+                              <div className="field-block">
+                                <Text className="field-label">OpenAI 文生图路径</Text>
+                                <Input
+                                  value={connection.openaiTextPath}
+                                  onChange={(event) =>
+                                    setConnection((previous) => ({
+                                      ...previous,
+                                      openaiTextPath: event.target.value,
+                                    }))
+                                  }
+                                  placeholder="/responses"
+                                />
+                              </div>
 
-                          <div className="field-block">
-                            <Text className="field-label">OpenAI 图生图路径</Text>
-                            <Input
-                              value={connection.openaiEditPath}
-                              onChange={(event) =>
-                                setConnection((previous) => ({
-                                  ...previous,
-                                  openaiEditPath: event.target.value,
-                                }))
-                              }
-                              placeholder="/responses"
-                            />
-                          </div>
+                              <div className="field-block">
+                                <Text className="field-label">OpenAI 图生图路径</Text>
+                                <Input
+                                  value={connection.openaiEditPath}
+                                  onChange={(event) =>
+                                    setConnection((previous) => ({
+                                      ...previous,
+                                      openaiEditPath: event.target.value,
+                                    }))
+                                  }
+                                  placeholder="/responses"
+                                />
+                              </div>
 
-                          <div className="field-block">
-                            <Text className="field-label">Gemini 路径模板</Text>
-                            <Input
-                              value={connection.geminiPathTemplate}
-                              onChange={(event) =>
-                                setConnection((previous) => ({
-                                  ...previous,
-                                  geminiPathTemplate: event.target.value,
-                                }))
-                              }
-                              placeholder="/v1beta/models/{model}:generateContent"
-                            />
-                          </div>
+                              <div className="field-block">
+                                <Text className="field-label">Gemini 路径模板</Text>
+                                <Input
+                                  value={connection.geminiPathTemplate}
+                                  onChange={(event) =>
+                                    setConnection((previous) => ({
+                                      ...previous,
+                                      geminiPathTemplate: event.target.value,
+                                    }))
+                                  }
+                                  placeholder="/v1beta/models/{model}:generateContent"
+                                />
+                              </div>
+                            </>
+                          ) : (
+                            <>
+                              <div className="field-block">
+                                <Text className="field-label">n8n 提示词优化路径</Text>
+                                <Input
+                                  value={connection.n8nPromptOptimizePath}
+                                  onChange={(event) =>
+                                    setConnection((previous) => ({
+                                      ...previous,
+                                      n8nPromptOptimizePath: event.target.value,
+                                    }))
+                                  }
+                                  placeholder={DEFAULT_N8N_PROMPT_OPTIMIZE_PATH}
+                                />
+                              </div>
+
+                              <div className="field-block">
+                                <Text className="field-label">n8n 生图提交路径</Text>
+                                <Input
+                                  value={connection.n8nGeneratePath}
+                                  onChange={(event) =>
+                                    setConnection((previous) => ({
+                                      ...previous,
+                                      n8nGeneratePath: event.target.value,
+                                    }))
+                                  }
+                                  placeholder={DEFAULT_N8N_GENERATE_PATH}
+                                />
+                              </div>
+
+                              <div className="field-block">
+                                <Text className="field-label">n8n 状态查询路径</Text>
+                                <Input
+                                  value={connection.n8nStatusPath}
+                                  onChange={(event) =>
+                                    setConnection((previous) => ({
+                                      ...previous,
+                                      n8nStatusPath: event.target.value,
+                                    }))
+                                  }
+                                  placeholder={DEFAULT_N8N_STATUS_PATH}
+                                />
+                              </div>
+                            </>
+                          )}
 
                           <div className="field-block full-width">
                             <Text className="field-label">额外请求头（JSON 或每行 key:value）</Text>
@@ -7100,8 +7696,8 @@ function App() {
                 {typeof runState.latencyMs === 'number' ? (
                   <Tag icon={<ClockCircleOutlined />}>{runState.latencyMs} ms</Tag>
                 ) : null}
-                <Tag color={connection.provider === 'openai' ? 'blue' : 'green'}>
-                  {connection.provider === 'openai' ? 'ChatGPT' : 'Gemini'} · {connection.model}
+                <Tag color={connection.backendMode === 'n8n' ? 'purple' : connection.provider === 'openai' ? 'blue' : 'green'}>
+                  {connection.backendMode === 'n8n' ? 'n8n' : connection.provider === 'openai' ? 'ChatGPT' : 'Gemini'} · {connection.model}
                 </Tag>
               </Space>
             </div>

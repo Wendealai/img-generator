@@ -1,0 +1,109 @@
+{
+  "name": "img-prompt-optimize",
+  "nodes": [
+    {
+      "id": "webhook_prompt_optimize",
+      "name": "Webhook Prompt Optimize",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        -640,
+        80
+      ],
+      "parameters": {
+        "path": "img-prompt-optimize",
+        "httpMethod": "POST",
+        "responseMode": "lastNode",
+        "options": {}
+      },
+      "webhookId": "img-prompt-optimize"
+    },
+    {
+      "id": "prepare_prompt_payload",
+      "name": "Prepare Prompt Payload",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -360,
+        80
+      ],
+      "parameters": {
+        "jsCode": "const body = ($json.body && typeof $json.body === 'object') ? $json.body : $json;\nconst prompt = String(body.prompt ?? '').trim();\nif (!prompt) {\n  throw new Error('Missing prompt');\n}\nconst negativePrompt = String(body.negativePrompt ?? body.negative_prompt ?? '').trim();\nconst mode = String(body.mode ?? 'text-to-image');\nconst model = String(body.model ?? 'gpt-5.5').trim() || 'gpt-5.5';\nconst systemPrompt = [\n  'You are a senior image prompt engineer.',\n  'Rewrite user prompts for text-to-image and image-to-image generation.',\n  'Output concise, detailed, production-ready prompts.',\n  'Keep safety-compliant language and avoid policy-violating requests.',\n  'Return plain text only without markdown.'\n].join(' ');\nconst userPrompt = [\n  'Task: optimize image generation prompt.',\n  'Mode: ' + mode,\n  'Original Prompt: ' + prompt,\n  negativePrompt ? 'Negative Prompt: ' + negativePrompt : ''\n].filter(Boolean).join('\\n');\nreturn [{\n  json: {\n    requestPayload: {\n      model,\n      stream: false,\n      input: [\n        {\n          role: 'system',\n          content: [{ type: 'input_text', text: systemPrompt }],\n        },\n        {\n          role: 'user',\n          content: [{ type: 'input_text', text: userPrompt }],\n        },\n      ],\n    },\n    originalPrompt: prompt,\n    originalNegativePrompt: negativePrompt,\n    mode,\n    model,\n  },\n}];"
+      }
+    },
+    {
+      "id": "call_asxs_responses_prompt",
+      "name": "Call ASXS Responses",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        -60,
+        80
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.asxs.top/v1/responses",
+        "sendBody": true,
+        "contentType": "json",
+        "specifyBody": "json",
+        "jsonBody": "={{$json.requestPayload}}",
+        "options": {
+          "timeout": 120000
+        }
+      }
+    },
+    {
+      "id": "format_prompt_output",
+      "name": "Format Prompt Output",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        220,
+        80
+      ],
+      "parameters": {
+        "jsCode": "const payload = ($json.body && typeof $json.body === 'object') ? $json.body : $json;\nconst readText = (node) => {\n  if (!node) return '';\n  if (typeof node === 'string') return node.trim();\n  if (Array.isArray(node)) {\n    for (const item of node) {\n      const text = readText(item);\n      if (text) return text;\n    }\n    return '';\n  }\n  if (typeof node !== 'object') return '';\n  const candidates = [\n    node.output_text,\n    node.text,\n    node.message,\n    node.content,\n  ];\n  for (const candidate of candidates) {\n    const text = readText(candidate);\n    if (text) return text;\n  }\n  for (const value of Object.values(node)) {\n    const text = readText(value);\n    if (text) return text;\n  }\n  return '';\n};\nconst outputText = readText(payload);\nif (!outputText) {\n  throw new Error('Responses API returned no optimization text.');\n}\nconst optimizedPrompt = outputText.slice(0, 6000).trim();\nreturn [{\n  json: {\n    ok: true,\n    optimizedPrompt,\n    summary: optimizedPrompt.slice(0, 500),\n    raw: payload,\n  },\n}];"
+      }
+    }
+  ],
+  "connections": {
+    "Webhook Prompt Optimize": {
+      "main": [
+        [
+          {
+            "node": "Prepare Prompt Payload",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare Prompt Payload": {
+      "main": [
+        [
+          {
+            "node": "Call ASXS Responses",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Call ASXS Responses": {
+      "main": [
+        [
+          {
+            "node": "Format Prompt Output",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "versionId": "00000000-0000-4000-9000-000000000001"
+}
