@@ -187,6 +187,8 @@ interface GenerateRuntimeConfig {
   requestIntervalMs: number
   dailyImageQuota: number
   dailyBudgetUsd: number
+  softLimitWarnPercent: number
+  strictBudgetGuard: boolean
   fallbackBaseUrls: string
   qualityGuardEnabled: boolean
   blockedWords: string
@@ -307,6 +309,18 @@ interface UploadAnalysis {
   sizeKb: number
   width?: number
   height?: number
+  status?: 'pass' | 'warn' | 'block'
+  willNormalize?: boolean
+  optimizedMimeType?: string
+  optimizedSizeKb?: number
+  issues?: string[]
+}
+
+interface ImportSummary {
+  totalRows: number
+  validRows: number
+  deduped: number
+  sourceType: 'text' | 'csv' | 'tsv' | 'json' | 'file'
 }
 
 interface StreamEventTrace {
@@ -330,6 +344,7 @@ const WORKSPACE_KEY = 'aurora-image-studio.workspace.v1'
 const TEMPLATE_VERSION_KEY = 'aurora-image-studio.template-versions.v1'
 const AUDIT_LOG_KEY = 'aurora-image-studio.audit.v1'
 const PUBLISH_KEY = 'aurora-image-studio.publish.v1'
+const TEMPLATE_BEST_KEY = 'aurora-image-studio.template-best.v1'
 
 const OPENAI_MODELS = ['gpt-5.4', 'gpt-5.2', 'gpt-5.4-mini']
 const GEMINI_MODELS = ['nanobanana2']
@@ -500,6 +515,7 @@ const PROMPT_TEMPLATE_LIBRARY: PromptTemplate[] = [
     recommendedStyle: 'editorial',
   },
 ]
+
 const QUICK_TEMPLATE_IDS = [
   'cinematic-portrait',
   'oriental-courtyard',
@@ -554,6 +570,91 @@ const DEFAULT_BATCH: BatchConfig = {
   rerollCount: 6,
 }
 
+const CURATED_PRESET_MARKET: ParameterPreset[] = [
+  {
+    id: 'market-cinematic-portrait',
+    name: '电影人像 Pro',
+    generation: {
+      ...DEFAULT_GENERATION,
+      resolution: '1024x1536',
+      quality: 'high',
+      style: 'cinematic',
+      temperature: 0.65,
+      imageCount: 1,
+    },
+    batch: { ...DEFAULT_BATCH, mode: 'single' },
+  },
+  {
+    id: 'market-ecom-product',
+    name: '电商产品白底',
+    generation: {
+      ...DEFAULT_GENERATION,
+      resolution: '2048x2048',
+      quality: 'high',
+      style: 'editorial',
+      background: 'opaque',
+      temperature: 0.45,
+      imageCount: 1,
+    },
+    batch: { ...DEFAULT_BATCH, mode: 'single' },
+  },
+  {
+    id: 'market-poster-kv',
+    name: '品牌海报 KV',
+    generation: {
+      ...DEFAULT_GENERATION,
+      resolution: '2048x2048',
+      quality: 'high',
+      style: 'editorial',
+      aspectRatio: '1:1',
+      imageCount: 2,
+      temperature: 0.6,
+    },
+    batch: { ...DEFAULT_BATCH, mode: 'reroll', rerollCount: 4 },
+  },
+  {
+    id: 'market-anime-poster',
+    name: '动漫海报',
+    generation: {
+      ...DEFAULT_GENERATION,
+      resolution: '1024x1536',
+      quality: 'high',
+      style: 'illustration',
+      aspectRatio: '3:2',
+      imageCount: 2,
+      temperature: 0.75,
+    },
+    batch: { ...DEFAULT_BATCH, mode: 'reroll', rerollCount: 6 },
+  },
+  {
+    id: 'market-architecture',
+    name: '建筑空间写实',
+    generation: {
+      ...DEFAULT_GENERATION,
+      resolution: '1536x1024',
+      quality: 'high',
+      style: 'photoreal',
+      aspectRatio: '16:9',
+      imageCount: 1,
+      temperature: 0.55,
+    },
+    batch: { ...DEFAULT_BATCH, mode: 'single' },
+  },
+  {
+    id: 'market-social-fast',
+    name: '社媒快产模式',
+    generation: {
+      ...DEFAULT_GENERATION,
+      resolution: '1024x1024',
+      quality: 'standard',
+      style: 'auto',
+      imageCount: 1,
+      temperature: 0.8,
+    },
+    batch: { ...DEFAULT_BATCH, mode: 'prompt-list' },
+  },
+]
+
 const DEFAULT_PROMPT_TEMPLATE_STORE: PromptTemplateStore = {
   favorites: [],
   recent: [],
@@ -564,6 +665,8 @@ const DEFAULT_RUNTIME_CONFIG: GenerateRuntimeConfig = {
   requestIntervalMs: 300,
   dailyImageQuota: 120,
   dailyBudgetUsd: 15,
+  softLimitWarnPercent: 80,
+  strictBudgetGuard: true,
   fallbackBaseUrls: '',
   qualityGuardEnabled: true,
   blockedWords: '血腥,暴力,仇恨,违法',
@@ -999,6 +1102,28 @@ function readStoredPublished(): string[] {
   }
 }
 
+function readStoredTemplateBestMap(): Record<string, string> {
+  try {
+    const raw = localStorage.getItem(TEMPLATE_BEST_KEY)
+    if (!raw) {
+      return {}
+    }
+    const parsed = safeJsonParse(raw)
+    if (!isRecord(parsed)) {
+      return {}
+    }
+    const next: Record<string, string> = {}
+    for (const [key, value] of Object.entries(parsed)) {
+      if (typeof value === 'string' && value.trim()) {
+        next[key] = value
+      }
+    }
+    return next
+  } catch {
+    return {}
+  }
+}
+
 function getTodayStamp(): string {
   const now = new Date()
   const y = now.getFullYear()
@@ -1185,6 +1310,79 @@ function normalizeUrlLines(raw: string): string[] {
     .filter((item, index, list) => list.indexOf(item) === index)
 }
 
+function splitDelimitedLine(line: string, delimiter: ',' | '\t'): string[] {
+  const cells: string[] = []
+  let current = ''
+  let inQuotes = false
+  for (let index = 0; index < line.length; index += 1) {
+    const char = line[index]
+    if (char === '"') {
+      if (inQuotes && line[index + 1] === '"') {
+        current += '"'
+        index += 1
+      } else {
+        inQuotes = !inQuotes
+      }
+      continue
+    }
+    if (char === delimiter && !inQuotes) {
+      cells.push(current.trim())
+      current = ''
+      continue
+    }
+    current += char
+  }
+  cells.push(current.trim())
+  return cells
+}
+
+function parseDelimitedPrompts(raw: string, delimiter: ',' | '\t'): string[] {
+  const lines = raw
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean)
+  if (lines.length === 0) {
+    return []
+  }
+
+  const rows = lines.map((line) => splitDelimitedLine(line, delimiter))
+  const normalizedHeaders = rows[0].map((cell) => cell.toLowerCase())
+  const headerPriority = ['prompt', '提示词', 'text', 'input']
+  let promptColumnIndex = -1
+  for (const candidate of headerPriority) {
+    const index = normalizedHeaders.findIndex((header) => header === candidate)
+    if (index >= 0) {
+      promptColumnIndex = index
+      break
+    }
+  }
+  const hasHeader = promptColumnIndex >= 0
+  if (!hasHeader) {
+    if (rows.length <= 1 && delimiter === ',') {
+      // Keep simple one-line comma splitting behavior in parsePromptImport fallback.
+      return []
+    }
+    promptColumnIndex = 0
+  }
+
+  const bodyRows = hasHeader ? rows.slice(1) : rows
+  const prompts: string[] = []
+  for (const row of bodyRows) {
+    const candidate =
+      row[promptColumnIndex]?.trim() ||
+      row.find((cell) => cell.trim().length > 0)?.trim() ||
+      ''
+    if (!candidate) {
+      continue
+    }
+    if (candidate.startsWith('#') || candidate.startsWith('//')) {
+      continue
+    }
+    prompts.push(candidate)
+  }
+  return prompts
+}
+
 function parsePromptImport(raw: string): string[] {
   const trimmed = raw.trim()
   if (!trimmed) {
@@ -1204,6 +1402,18 @@ function parsePromptImport(raw: string): string[] {
       return parsed.prompts
         .map((item) => (typeof item === 'string' ? item.trim() : ''))
         .filter(Boolean)
+    }
+  }
+  if (trimmed.includes('\t')) {
+    const prompts = parseDelimitedPrompts(trimmed, '\t')
+    if (prompts.length > 0) {
+      return prompts
+    }
+  }
+  if (trimmed.includes(',') && trimmed.split('\n').length >= 1) {
+    const prompts = parseDelimitedPrompts(trimmed, ',')
+    if (prompts.length > 0) {
+      return prompts
     }
   }
   if (trimmed.includes(',') && trimmed.split('\n').length <= 2) {
@@ -1262,6 +1472,24 @@ function replaceTemplateVariables(text: string, variables: Record<string, string
     output = output.replace(pattern, value)
   }
   return output
+}
+
+function summarizePromptDiff(newer: string, older: string): string {
+  const newerTokens = newer
+    .split(/[\s,，。!！?？;；:：]+/)
+    .map((item) => item.trim())
+    .filter(Boolean)
+  const olderTokens = older
+    .split(/[\s,，。!！?？;；:：]+/)
+    .map((item) => item.trim())
+    .filter(Boolean)
+  const newerSet = new Set(newerTokens)
+  const olderSet = new Set(olderTokens)
+  const added = newerTokens.filter((token) => !olderSet.has(token))
+  const removed = olderTokens.filter((token) => !newerSet.has(token))
+  return `新增关键词 ${added.slice(0, 8).join(' / ') || '-'}；删除关键词 ${
+    removed.slice(0, 8).join(' / ') || '-'
+  }`
 }
 
 function recommendConfigByPrompt(prompt: string): Partial<GenerationConfig> {
@@ -2334,6 +2562,87 @@ async function optimizeImageForModelInput(
   }
 }
 
+function estimateBase64Bytes(base64: string): number {
+  const normalized = base64.replace(/\s+/g, '')
+  if (!normalized) {
+    return 0
+  }
+  const padding = normalized.endsWith('==') ? 2 : normalized.endsWith('=') ? 1 : 0
+  return Math.max(0, Math.floor((normalized.length * 3) / 4) - padding)
+}
+
+async function buildUploadPreflight(file: File): Promise<UploadAnalysis> {
+  const analysis: UploadAnalysis = {
+    mimeType: file.type || 'unknown',
+    sizeKb: Math.round(file.size / 1024),
+    status: 'pass',
+    willNormalize: false,
+    issues: [],
+  }
+
+  if (file.size > 30 * 1024 * 1024) {
+    analysis.status = 'block'
+    analysis.issues?.push('文件过大（超过 30MB），建议先压缩后再上传。')
+  }
+
+  let width = 0
+  let height = 0
+  try {
+    const bitmap = await createImageBitmap(file)
+    width = bitmap.width
+    height = bitmap.height
+    analysis.width = bitmap.width
+    analysis.height = bitmap.height
+    bitmap.close()
+  } catch {
+    // Ignore width/height detection failure.
+  }
+
+  const edge = Math.max(width, height)
+  if (edge > MAX_IMAGE_INPUT_EDGE) {
+    analysis.status = analysis.status === 'block' ? 'block' : 'warn'
+    analysis.willNormalize = true
+    analysis.issues?.push(`分辨率过大（${width}x${height}），会自动压缩到最大边 ${MAX_IMAGE_INPUT_EDGE}px。`)
+  }
+
+  if (file.size > MAX_IMAGE_INPUT_BYTES) {
+    analysis.status = analysis.status === 'block' ? 'block' : 'warn'
+    analysis.willNormalize = true
+    analysis.issues?.push('文件体积较大，会自动压缩后再提交。')
+  }
+
+  if (!SUPPORTED_IMAGE_INPUT_MIME_TYPES.has(file.type)) {
+    analysis.status = analysis.status === 'block' ? 'block' : 'warn'
+    analysis.willNormalize = true
+    analysis.issues?.push(`当前格式 ${file.type || 'unknown'} 将自动转换为 JPG。`)
+  }
+
+  if (width > 0 && height > 0) {
+    const ratio = width / Math.max(1, height)
+    if (ratio > 4 || ratio < 0.25) {
+      analysis.status = analysis.status === 'block' ? 'block' : 'warn'
+      analysis.issues?.push('图片长宽比极端，可能影响图生图稳定性。')
+    }
+    if (width < 256 || height < 256) {
+      analysis.status = analysis.status === 'block' ? 'block' : 'warn'
+      analysis.issues?.push('图片尺寸较小，建议至少 512px 以上以提高细节质量。')
+    }
+  }
+
+  try {
+    const optimized = await optimizeImageForModelInput(file)
+    analysis.optimizedMimeType = optimized.mimeType
+    analysis.optimizedSizeKb = Math.max(1, Math.round(estimateBase64Bytes(optimized.base64) / 1024))
+  } catch {
+    // Ignore optimization estimation failure.
+  }
+
+  if (!analysis.issues || analysis.issues.length === 0) {
+    analysis.issues = ['输入图符合推荐规格。']
+  }
+  return analysis
+}
+
 async function prepareRequest(
   mode: StudioMode,
   connection: ConnectionConfig,
@@ -2629,6 +2938,7 @@ function App() {
   const [queueTasks, setQueueTasks] = useState<QueueTask[]>([])
   const [queuePaused, setQueuePaused] = useState(false)
   const [queuePriorityMap, setQueuePriorityMap] = useState<Record<string, QueueTaskPriority>>({})
+  const [importSummary, setImportSummary] = useState<ImportSummary | null>(null)
   const [historyFilter, setHistoryFilter] = useState<HistoryFilter>(DEFAULT_HISTORY_FILTER)
   const [historySelection, setHistorySelection] = useState<string[]>([])
   const [historyFolderInput, setHistoryFolderInput] = useState('默认')
@@ -2650,7 +2960,23 @@ function App() {
   const [templateVersions, setTemplateVersions] = useState<Record<string, string[]>>(() =>
     readTemplateVersionStore(),
   )
+  const [templateBestImageMap, setTemplateBestImageMap] = useState<Record<string, string>>(() =>
+    readStoredTemplateBestMap(),
+  )
   const [templateVersionSelection, setTemplateVersionSelection] = useState<Record<string, number>>({})
+  const [templateDiffModal, setTemplateDiffModal] = useState<{
+    open: boolean
+    title: string
+    summary: string
+    newer: string
+    older: string
+  }>({
+    open: false,
+    title: '',
+    summary: '',
+    newer: '',
+    older: '',
+  })
   const [promptAutocompleteEnabled, setPromptAutocompleteEnabled] = useState(true)
   const [imageMetadataMap, setImageMetadataMap] = useState<Record<string, ImageMetadata>>({})
   const [imageHashMap, setImageHashMap] = useState<Record<string, string>>({})
@@ -2733,6 +3059,10 @@ function App() {
   useEffect(() => {
     safeLocalStorageSet(TEMPLATE_VERSION_KEY, JSON.stringify(templateVersions))
   }, [templateVersions])
+
+  useEffect(() => {
+    safeLocalStorageSet(TEMPLATE_BEST_KEY, JSON.stringify(templateBestImageMap))
+  }, [templateBestImageMap])
 
   useEffect(() => {
     safeLocalStorageSet(AUDIT_LOG_KEY, JSON.stringify(auditLogs.slice(0, 200)))
@@ -3229,6 +3559,38 @@ function App() {
     addAuditLog('template.version.rollback', `模板 ${templateId} 回滚到旧版本`)
   }
 
+  const openTemplateVersionDiff = (template: PromptTemplate) => {
+    const versionList = templateVersions[template.id] ?? [template.prompt]
+    const currentIndex = Math.max(0, templateVersionSelection[template.id] ?? 0)
+    const newer = versionList[currentIndex] ?? versionList[0] ?? template.prompt
+    const older = versionList[currentIndex + 1] ?? template.prompt
+    const summary = summarizePromptDiff(newer, older)
+    setTemplateDiffModal({
+      open: true,
+      title: `${template.label} 版本差异`,
+      summary,
+      newer,
+      older,
+    })
+  }
+
+  const bindTemplateBestImage = (template: PromptTemplate) => {
+    const resolvedPrompt = resolveTemplatePrompt(template).trim()
+    const matchedImage =
+      images.find((image) => imageMetadataMap[image.src]?.prompt.trim() === resolvedPrompt) ??
+      images[0]
+    if (!matchedImage) {
+      messageApi.warning('暂无可绑定的图片，请先生成后再绑定最佳图')
+      return
+    }
+    setTemplateBestImageMap((previous) => ({
+      ...previous,
+      [template.id]: matchedImage.src,
+    }))
+    addAuditLog('template.best.bind', `模板 ${template.id} 绑定最佳图`)
+    messageApi.success('已绑定最佳图')
+  }
+
   const applyPromptTemplate = (template: PromptTemplate) => {
     const resolvedPrompt = resolveTemplatePrompt(template)
     setGeneration((previous) => ({
@@ -3312,6 +3674,33 @@ function App() {
     }
   }
 
+  const addMarketPresetToMine = (preset: ParameterPreset) => {
+    setPresets((previous) => {
+      const exists = previous.some((item) => item.name === preset.name)
+      if (exists) {
+        return previous
+      }
+      return [
+        {
+          id: crypto.randomUUID(),
+          name: `${preset.name}（市场）`,
+          generation: preset.generation,
+          batch: preset.batch,
+        },
+        ...previous,
+      ].slice(0, 30)
+    })
+    addAuditLog('preset.market.add', `添加市场预设 ${preset.name}`)
+    messageApi.success(`已添加到我的预设：${preset.name}`)
+  }
+
+  const applyMarketPreset = (preset: ParameterPreset) => {
+    setGeneration(preset.generation)
+    setBatchConfig(preset.batch)
+    addAuditLog('preset.market.apply', `套用市场预设 ${preset.name}`)
+    messageApi.success(`已套用市场预设：${preset.name}`)
+  }
+
   const saveWorkspaceProfile = () => {
     const name = workspaceNameInput.trim() || `空间-${new Date().toLocaleTimeString()}`
     setWorkspaceProfiles((previous) => [
@@ -3363,7 +3752,9 @@ function App() {
   }
 
   const importPromptLines = () => {
-    const prompts = parsePromptImport(importPromptText)
+    const rawText = importPromptText.trim()
+    const parsedPrompts = parsePromptImport(importPromptText)
+    const prompts = Array.from(new Set(parsedPrompts.map((item) => item.trim()).filter(Boolean)))
     if (prompts.length === 0) {
       messageApi.error('未解析到可用提示词，请粘贴 TXT/CSV/JSON 内容')
       return
@@ -3373,6 +3764,19 @@ function App() {
       mode: 'prompt-list',
       promptList: prompts.join('\n'),
     }))
+    const sourceType: ImportSummary['sourceType'] = rawText.startsWith('[') || rawText.startsWith('{')
+      ? 'json'
+      : rawText.includes('\t')
+        ? 'tsv'
+        : rawText.includes(',')
+          ? 'csv'
+          : 'text'
+    setImportSummary({
+      totalRows: parsedPrompts.length,
+      validRows: prompts.length,
+      deduped: Math.max(0, parsedPrompts.length - prompts.length),
+      sourceType,
+    })
     messageApi.success(`已导入 ${prompts.length} 条提示词`)
   }
 
@@ -3899,17 +4303,18 @@ function App() {
     setUploadAnalysis({
       mimeType: nextFile.type || 'unknown',
       sizeKb: Math.round(nextFile.size / 1024),
+      status: 'pass',
+      issues: ['正在分析输入图规格...'],
     })
     void (async () => {
       try {
-        const bitmap = await createImageBitmap(nextFile)
-        setUploadAnalysis({
-          mimeType: nextFile.type || 'unknown',
-          sizeKb: Math.round(nextFile.size / 1024),
-          width: bitmap.width,
-          height: bitmap.height,
-        })
-        bitmap.close()
+        const analysis = await buildUploadPreflight(nextFile)
+        setUploadAnalysis(analysis)
+        if (analysis.status === 'block') {
+          messageApi.error('输入图预检未通过：请先压缩图片或更换文件后重试')
+        } else if (analysis.status === 'warn') {
+          messageApi.warning('输入图可用，但建议按预检提示优化后再生成')
+        }
       } catch {
         // ignore
       }
@@ -3987,7 +4392,23 @@ function App() {
       predictedImageCount,
       generation.quality,
     )
-    if (todayUsage.images + predictedImageCount > runtimeConfig.dailyImageQuota) {
+    const projectedImages = todayUsage.images + predictedImageCount
+    const projectedCostUsd = todayUsage.estimatedCostUsd + estimatedCost
+    const quotaPercent = Math.round((projectedImages / Math.max(1, runtimeConfig.dailyImageQuota)) * 100)
+    const budgetPercent = Math.round(
+      (projectedCostUsd / Math.max(1, runtimeConfig.dailyBudgetUsd)) * 100,
+    )
+
+    if (
+      quotaPercent >= runtimeConfig.softLimitWarnPercent ||
+      budgetPercent >= runtimeConfig.softLimitWarnPercent
+    ) {
+      messageApi.warning(
+        `已接近额度上限：配额 ${quotaPercent}% · 预算 ${budgetPercent}%（阈值 ${runtimeConfig.softLimitWarnPercent}%）`,
+      )
+    }
+
+    if (runtimeConfig.strictBudgetGuard && projectedImages > runtimeConfig.dailyImageQuota) {
       messageApi.error(
         `超出今日配额：预计 ${predictedImageCount} 张，今日剩余 ${
           Math.max(0, runtimeConfig.dailyImageQuota - todayUsage.images)
@@ -3995,13 +4416,32 @@ function App() {
       )
       return
     }
-    if (todayUsage.estimatedCostUsd + estimatedCost > runtimeConfig.dailyBudgetUsd) {
+    if (runtimeConfig.strictBudgetGuard && projectedCostUsd > runtimeConfig.dailyBudgetUsd) {
       messageApi.error(
         `超出今日预算：预计 $${estimatedCost.toFixed(2)}，剩余额度 $${Math.max(
           0,
           runtimeConfig.dailyBudgetUsd - todayUsage.estimatedCostUsd,
         ).toFixed(2)}`,
       )
+      return
+    }
+    if (!runtimeConfig.strictBudgetGuard && (projectedImages > runtimeConfig.dailyImageQuota || projectedCostUsd > runtimeConfig.dailyBudgetUsd)) {
+      addAuditLog(
+        'budget.guard.warn',
+        `非阻断模式继续执行：配额 ${projectedImages}/${runtimeConfig.dailyImageQuota}，预算 $${projectedCostUsd.toFixed(2)}/${runtimeConfig.dailyBudgetUsd.toFixed(2)}`,
+      )
+      addDiagnostic({
+        category: 'quota',
+        summary: `已超过预设额度但继续执行（非阻断模式）`,
+        suggestion: '建议降低并发、减少抽卡次数或切换标准质量。',
+        endpoint: endpointPreview,
+        model: connection.model,
+        retryable: false,
+      })
+    }
+
+    if (mode === 'image-to-image' && source.file && uploadAnalysis?.status === 'block') {
+      messageApi.error('输入图预检未通过，请按提示优化后再生成')
       return
     }
 
@@ -5123,6 +5563,7 @@ function App() {
                   const resolvedPreview = runtimeConfig.templateVariablesEnabled
                     ? replaceTemplateVariables(versionList[selectedVersionIndex] ?? template.prompt, templateVariables)
                     : versionList[selectedVersionIndex] ?? template.prompt
+                  const bestImageSrc = templateBestImageMap[template.id]
                   return (
                     <article key={template.id} className="template-item">
                       <div className="template-item-main">
@@ -5136,6 +5577,14 @@ function App() {
                         <Paragraph className="template-item-prompt" ellipsis={{ rows: 2 }}>
                           {resolvedPreview}
                         </Paragraph>
+                        {bestImageSrc ? (
+                          <div className="template-best-shot">
+                            <img src={bestImageSrc} alt={`${template.label} best`} />
+                            <Text type="secondary">已绑定最佳图</Text>
+                          </div>
+                        ) : (
+                          <Text type="secondary">未绑定最佳图</Text>
+                        )}
                         <Space size={6} wrap>
                           <Tag color="purple">版本 {selectedVersionIndex + 1}/{versionList.length}</Tag>
                           <Select
@@ -5186,6 +5635,18 @@ function App() {
                           onClick={() => rollbackTemplateVersion(template.id)}
                         >
                           回滚
+                        </Button>
+                        <Button
+                          size="small"
+                          onClick={() => openTemplateVersionDiff(template)}
+                        >
+                          版本差异
+                        </Button>
+                        <Button
+                          size="small"
+                          onClick={() => bindTemplateBestImage(template)}
+                        >
+                          绑定最佳图
                         </Button>
                       </div>
                     </article>
@@ -5381,13 +5842,39 @@ function App() {
             )}
           </div>
           {uploadAnalysis ? (
-            <Text type="secondary">
-              预处理输入：{uploadAnalysis.mimeType} · {uploadAnalysis.sizeKb}KB
-              {typeof uploadAnalysis.width === 'number' && typeof uploadAnalysis.height === 'number'
-                ? ` · ${uploadAnalysis.width}x${uploadAnalysis.height}`
-                : ''}
-              （超大图会自动压缩与规整）
-            </Text>
+            <Alert
+              type={
+                uploadAnalysis.status === 'block'
+                  ? 'error'
+                  : uploadAnalysis.status === 'warn'
+                    ? 'warning'
+                    : 'success'
+              }
+              showIcon
+              message={`输入图预检：${uploadAnalysis.mimeType} · ${uploadAnalysis.sizeKb}KB${
+                typeof uploadAnalysis.width === 'number' && typeof uploadAnalysis.height === 'number'
+                  ? ` · ${uploadAnalysis.width}x${uploadAnalysis.height}`
+                  : ''
+              }`}
+              description={
+                <div className="upload-preflight-desc">
+                  <div>
+                    {uploadAnalysis.optimizedMimeType
+                      ? `预计发送：${uploadAnalysis.optimizedMimeType} · ${
+                          uploadAnalysis.optimizedSizeKb ?? '-'
+                        }KB`
+                      : '预计发送：原图直传'}
+                  </div>
+                  <div>
+                    {(uploadAnalysis.issues ?? []).slice(0, 3).map((issue) => (
+                      <Text key={issue} type="secondary">
+                        • {issue}
+                      </Text>
+                    ))}
+                  </div>
+                </div>
+              }
+            />
           ) : null}
 
           {source.previewUrl ? (
@@ -6008,6 +6495,31 @@ function App() {
               </Space>
             </div>
 
+            <div className="preset-market">
+              <div className="preset-manager-head">
+                <Text className="field-label">预设市场（推荐）</Text>
+                <Text type="secondary">精选工作流模板，可一键套用</Text>
+              </div>
+              <div className="preset-market-grid">
+                {CURATED_PRESET_MARKET.map((preset) => (
+                  <div key={preset.id} className="preset-market-item">
+                    <Text strong>{preset.name}</Text>
+                    <Text type="secondary">
+                      {preset.generation.resolution} · {preset.generation.quality} · {preset.generation.style}
+                    </Text>
+                    <Space>
+                      <Button size="small" onClick={() => applyMarketPreset(preset)}>
+                        套用
+                      </Button>
+                      <Button size="small" onClick={() => addMarketPresetToMine(preset)}>
+                        加入我的预设
+                      </Button>
+                    </Space>
+                  </div>
+                ))}
+              </div>
+            </div>
+
             <Divider />
 
             <div className="field-grid generation-grid">
@@ -6072,6 +6584,35 @@ function App() {
                   }
                   style={{ width: '100%' }}
                 />
+              </div>
+              <div className="field-block">
+                <Text className="field-label">额度预警阈值（%）</Text>
+                <InputNumber
+                  min={50}
+                  max={100}
+                  value={runtimeConfig.softLimitWarnPercent}
+                  onChange={(value) =>
+                    setRuntimeConfig((previous) => ({
+                      ...previous,
+                      softLimitWarnPercent: Math.max(50, Math.min(100, Math.floor(Number(value ?? 80)))),
+                    }))
+                  }
+                  style={{ width: '100%' }}
+                />
+              </div>
+              <div className="field-block">
+                <Text className="field-label">超额策略</Text>
+                <Checkbox
+                  checked={runtimeConfig.strictBudgetGuard}
+                  onChange={(event) =>
+                    setRuntimeConfig((previous) => ({
+                      ...previous,
+                      strictBudgetGuard: event.target.checked,
+                    }))
+                  }
+                >
+                  严格阻断（超过预算/配额直接停止）
+                </Checkbox>
               </div>
 
               <div className="field-block full-width">
@@ -6174,16 +6715,29 @@ function App() {
                     导入文件
                     <input
                       type="file"
-                      accept=".txt,.csv,.json"
+                      accept=".txt,.csv,.json,.tsv,.xlsx,.xls"
                       onChange={(event) => {
                         const file = event.target.files?.[0]
                         if (!file) {
+                          return
+                        }
+                        const lowerName = file.name.toLowerCase()
+                        if (lowerName.endsWith('.xlsx') || lowerName.endsWith('.xls')) {
+                          messageApi.warning(
+                            '当前前端仅原生解析 TXT/CSV/TSV/JSON。Excel 请先另存为 CSV，或复制表格列直接粘贴。',
+                          )
                           return
                         }
                         void file
                           .text()
                           .then((text) => {
                             setImportPromptText(text)
+                            setImportSummary({
+                              totalRows: 0,
+                              validRows: 0,
+                              deduped: 0,
+                              sourceType: 'file',
+                            })
                             messageApi.success(`已载入文件：${file.name}`)
                           })
                           .catch(() => messageApi.error('文件读取失败'))
@@ -6197,11 +6751,18 @@ function App() {
                     size="small"
                     onClick={() => {
                       setImportPromptText('')
+                      setImportSummary(null)
                     }}
                   >
                     清空
                   </Button>
                 </Space>
+                {importSummary ? (
+                  <Text type="secondary">
+                    导入统计：来源 {importSummary.sourceType} · 解析 {importSummary.totalRows} 条 · 有效{' '}
+                    {importSummary.validRows} 条 · 去重 {importSummary.deduped} 条
+                  </Text>
+                ) : null}
               </div>
 
               <div className="field-block full-width">
@@ -7249,6 +7810,42 @@ function App() {
             ) : (
               <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="请先在画廊选择两张图" />
             )}
+          </Modal>
+
+          <Modal
+            open={templateDiffModal.open}
+            title={templateDiffModal.title || '模板版本差异'}
+            width="min(92vw, 980px)"
+            centered
+            onCancel={() =>
+              setTemplateDiffModal((previous) => ({
+                ...previous,
+                open: false,
+              }))
+            }
+            footer={null}
+          >
+            <Alert type="info" showIcon message={templateDiffModal.summary || '暂无差异摘要'} />
+            <div className="template-diff-grid">
+              <div>
+                <Text type="secondary">当前版本</Text>
+                <Input.TextArea
+                  className="mono-area"
+                  value={templateDiffModal.newer}
+                  readOnly
+                  autoSize={{ minRows: 8, maxRows: 18 }}
+                />
+              </div>
+              <div>
+                <Text type="secondary">上一版本</Text>
+                <Input.TextArea
+                  className="mono-area"
+                  value={templateDiffModal.older}
+                  readOnly
+                  autoSize={{ minRows: 8, maxRows: 18 }}
+                />
+              </div>
+            </div>
           </Modal>
 
           <Card
