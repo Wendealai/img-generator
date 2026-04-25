@@ -2023,6 +2023,84 @@ function App() {
     messageApi.success('已恢复该条历史记录')
   }
 
+  const renderBatchControl = (context: 'text' | 'image') => (
+    <div className="batch-control">
+      <div className="batch-head">
+        <Text className="field-label">
+          批量胜场{context === 'image' ? '（图生图）' : ''}
+        </Text>
+        <Tag color={batchQueuePreview.length > 0 ? 'gold' : 'default'}>
+          队列 {batchQueuePreview.length} 条
+        </Tag>
+      </div>
+      <Segmented
+        block
+        value={batchConfig.mode}
+        options={[
+          { label: '单次', value: 'single' },
+          { label: '多提示词', value: 'prompt-list' },
+          { label: '抽卡', value: 'reroll' },
+        ]}
+        onChange={(value) =>
+          setBatchConfig((previous) => ({
+            ...previous,
+            mode:
+              value === 'prompt-list' || value === 'reroll'
+                ? value
+                : 'single',
+          }))
+        }
+      />
+
+      {batchConfig.mode === 'prompt-list' ? (
+        <div className="batch-panel">
+          <Text className="field-label">提示词清单（每行一条）</Text>
+          <Input.TextArea
+            className="prompt-list-input"
+            value={batchConfig.promptList}
+            onChange={(event) =>
+              setBatchConfig((previous) => ({
+                ...previous,
+                promptList: event.target.value,
+              }))
+            }
+            autoSize={{ minRows: 6, maxRows: 16 }}
+            placeholder={`示例：\n电影感人像，逆光，胶片质感\n高端产品海报，玻璃与金属材质\n国风庭院，晨雾，体积光`}
+          />
+          <Text type={batchQueuePreview.length > 0 ? 'secondary' : 'warning'}>
+            可用任务数：{batchQueuePreview.length}（支持 `#` 或 `//` 注释行）
+          </Text>
+        </div>
+      ) : null}
+
+      {batchConfig.mode === 'reroll' ? (
+        <div className="batch-reroll">
+          <Text className="field-label">抽卡次数</Text>
+          <InputNumber
+            min={1}
+            max={20}
+            value={normalizedRerollCount}
+            onChange={(value) =>
+              setBatchConfig((previous) => ({
+                ...previous,
+                rerollCount: Math.max(
+                  1,
+                  Math.min(20, Math.floor(Number(value ?? 1))),
+                ),
+              }))
+            }
+            style={{ width: 180 }}
+          />
+          <Text type="secondary">
+            {context === 'image'
+              ? `同一参考图与提示词连续生成 ${normalizedRerollCount} 次，适合图生图抽卡挑图。`
+              : `同一提示词连续生成 ${normalizedRerollCount} 次，适合抽卡挑图。`}
+          </Text>
+        </div>
+      ) : null}
+    </div>
+  )
+
   const modeTabs: TabsProps['items'] = [
     {
       key: 'text-to-image',
@@ -2068,78 +2146,7 @@ function App() {
             autoSize={{ minRows: 2, maxRows: 6 }}
             placeholder="不希望出现的元素，例如：模糊、文字乱码、畸形手部..."
           />
-
-          <div className="batch-control">
-            <div className="batch-head">
-              <Text className="field-label">批量胜场</Text>
-              <Tag color={batchQueuePreview.length > 0 ? 'gold' : 'default'}>
-                队列 {batchQueuePreview.length} 条
-              </Tag>
-            </div>
-            <Segmented
-              block
-              value={batchConfig.mode}
-              options={[
-                { label: '单次', value: 'single' },
-                { label: '多提示词', value: 'prompt-list' },
-                { label: '抽卡', value: 'reroll' },
-              ]}
-              onChange={(value) =>
-                setBatchConfig((previous) => ({
-                  ...previous,
-                  mode:
-                    value === 'prompt-list' || value === 'reroll'
-                      ? value
-                      : 'single',
-                }))
-              }
-            />
-
-            {batchConfig.mode === 'prompt-list' ? (
-              <div className="batch-panel">
-                <Text className="field-label">提示词清单（每行一条）</Text>
-                <Input.TextArea
-                  className="prompt-list-input"
-                  value={batchConfig.promptList}
-                  onChange={(event) =>
-                    setBatchConfig((previous) => ({
-                      ...previous,
-                      promptList: event.target.value,
-                    }))
-                  }
-                  autoSize={{ minRows: 6, maxRows: 16 }}
-                  placeholder={`示例：\n电影感人像，逆光，胶片质感\n高端产品海报，玻璃与金属材质\n国风庭院，晨雾，体积光`}
-                />
-                <Text type={batchQueuePreview.length > 0 ? 'secondary' : 'warning'}>
-                  可用任务数：{batchQueuePreview.length}（支持 `#` 或 `//` 注释行）
-                </Text>
-              </div>
-            ) : null}
-
-            {batchConfig.mode === 'reroll' ? (
-              <div className="batch-reroll">
-                <Text className="field-label">抽卡次数</Text>
-                <InputNumber
-                  min={1}
-                  max={20}
-                  value={normalizedRerollCount}
-                  onChange={(value) =>
-                    setBatchConfig((previous) => ({
-                      ...previous,
-                      rerollCount: Math.max(
-                        1,
-                        Math.min(20, Math.floor(Number(value ?? 1))),
-                      ),
-                    }))
-                  }
-                  style={{ width: 180 }}
-                />
-                <Text type="secondary">
-                  同一提示词连续生成 {normalizedRerollCount} 次，适合抽卡挑图。
-                </Text>
-              </div>
-            ) : null}
-          </div>
+          {renderBatchControl('text')}
         </div>
       ),
     },
@@ -2167,6 +2174,7 @@ function App() {
             }
             placeholder="图生图负向限制"
           />
+          {renderBatchControl('image')}
 
           <div className="upload-row">
             <label className="upload-button">
