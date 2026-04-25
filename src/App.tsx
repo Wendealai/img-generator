@@ -186,6 +186,58 @@ interface GenerateRuntimeConfig {
   minPromptLength: number
   enableSeedExperiment: boolean
   seedDelta: number
+  dependencyChainEnabled: boolean
+  maxRetries: number
+  retryBackoffMs: number
+  endpointProbeEnabled: boolean
+  endpointProbeIntervalSec: number
+  autoSelectBestEndpoint: boolean
+  similarityDedupeEnabled: boolean
+  similarityThreshold: number
+  approvalFlowEnabled: boolean
+  autoNamePattern: string
+  cloudSyncUrl: string
+  cloudSyncToken: string
+  webhookUrl: string
+  templateVariablesEnabled: boolean
+}
+
+interface EndpointHealth {
+  url: string
+  ok: boolean
+  latencyMs: number
+  statusCode: number
+  checkedAt: string
+}
+
+interface ImageMetadata {
+  prompt: string
+  model: string
+  seedLabel: string
+  latencyMs?: number
+  resolution: string
+  endpoint: string
+  createdAt: string
+}
+
+interface AbReport {
+  promptA: string
+  promptB: string
+  countA: number
+  countB: number
+  successRateA: number
+  successRateB: number
+  avgLatencyA: number
+  avgLatencyB: number
+  avgRatingA: number
+  avgRatingB: number
+}
+
+interface AuditLogEntry {
+  id: string
+  at: string
+  action: string
+  detail: string
 }
 
 interface HistoryFilter {
@@ -241,9 +293,32 @@ const PRESET_KEY = 'aurora-image-studio.parameter-presets.v1'
 const USAGE_KEY = 'aurora-image-studio.usage.v1'
 const RUNTIME_KEY = 'aurora-image-studio.runtime.v1'
 const WORKSPACE_KEY = 'aurora-image-studio.workspace.v1'
+const TEMPLATE_VERSION_KEY = 'aurora-image-studio.template-versions.v1'
+const AUDIT_LOG_KEY = 'aurora-image-studio.audit.v1'
+const PUBLISH_KEY = 'aurora-image-studio.publish.v1'
 
 const OPENAI_MODELS = ['gpt-5.4', 'gpt-5.2', 'gpt-5.4-mini']
 const GEMINI_MODELS = ['nanobanana2']
+const MODEL_CAPABILITY_MATRIX = [
+  {
+    model: 'gpt-image-2 (tool)',
+    provider: 'OpenAI',
+    resolutions: '1K / 2K / 4K',
+    supports: '文生图, 图生图, 流式 SSE, tool 调用',
+  },
+  {
+    model: 'nanobanana2',
+    provider: 'Gemini',
+    resolutions: '1K / 2K / 4K',
+    supports: '文生图, 图生图, 候选多图, prompt-list',
+  },
+  {
+    model: 'gpt-5.4 (outer)',
+    provider: 'OpenAI',
+    resolutions: '-',
+    supports: '驱动 image_generation 工具, 路由与重试',
+  },
+]
 const RESOLUTION_OPTIONS = ['1024x1024', '1536x1024', '1024x1536', '2048x2048', '4096x4096']
 const ASPECT_RATIO_OPTIONS = ['auto', '1:1', '4:3', '3:2', '16:9', '9:16']
 const STYLE_OPTIONS = [
@@ -461,6 +536,20 @@ const DEFAULT_RUNTIME_CONFIG: GenerateRuntimeConfig = {
   minPromptLength: 6,
   enableSeedExperiment: false,
   seedDelta: 77,
+  dependencyChainEnabled: false,
+  maxRetries: 1,
+  retryBackoffMs: 800,
+  endpointProbeEnabled: true,
+  endpointProbeIntervalSec: 30,
+  autoSelectBestEndpoint: true,
+  similarityDedupeEnabled: false,
+  similarityThreshold: 6,
+  approvalFlowEnabled: false,
+  autoNamePattern: '{date}-{index}-{model}',
+  cloudSyncUrl: '',
+  cloudSyncToken: '',
+  webhookUrl: '',
+  templateVariablesEnabled: false,
 }
 
 const DEFAULT_USAGE_STORE: UsageStore = {
@@ -801,6 +890,77 @@ function readWorkspaceProfiles(): WorkspaceProfile[] {
   }
 }
 
+function readTemplateVersionStore(): Record<string, string[]> {
+  try {
+    const raw = localStorage.getItem(TEMPLATE_VERSION_KEY)
+    if (!raw) {
+      return {}
+    }
+    const parsed = safeJsonParse(raw)
+    if (!isRecord(parsed)) {
+      return {}
+    }
+    const output: Record<string, string[]> = {}
+    for (const [templateId, value] of Object.entries(parsed)) {
+      if (!Array.isArray(value)) {
+        continue
+      }
+      const versions = value
+        .map((item) => (typeof item === 'string' ? item.trim() : ''))
+        .filter(Boolean)
+      if (versions.length > 0) {
+        output[templateId] = versions.slice(0, 12)
+      }
+    }
+    return output
+  } catch {
+    return {}
+  }
+}
+
+function readStoredAuditLogs(): AuditLogEntry[] {
+  try {
+    const raw = localStorage.getItem(AUDIT_LOG_KEY)
+    if (!raw) {
+      return []
+    }
+    const parsed = safeJsonParse(raw)
+    if (!Array.isArray(parsed)) {
+      return []
+    }
+    return parsed
+      .filter((item) => isRecord(item))
+      .slice(0, 200)
+      .map((item, index) => ({
+        id: typeof item.id === 'string' ? item.id : `audit-${index}`,
+        at: typeof item.at === 'string' ? item.at : new Date().toISOString(),
+        action: typeof item.action === 'string' ? item.action : 'unknown',
+        detail: typeof item.detail === 'string' ? item.detail : '',
+      }))
+  } catch {
+    return []
+  }
+}
+
+function readStoredPublished(): string[] {
+  try {
+    const raw = localStorage.getItem(PUBLISH_KEY)
+    if (!raw) {
+      return []
+    }
+    const parsed = safeJsonParse(raw)
+    if (!Array.isArray(parsed)) {
+      return []
+    }
+    return parsed
+      .map((item) => (typeof item === 'string' ? item : ''))
+      .filter(Boolean)
+      .slice(0, 200)
+  } catch {
+    return []
+  }
+}
+
 function getTodayStamp(): string {
   const now = new Date()
   const y = now.getFullYear()
@@ -910,6 +1070,171 @@ function validatePromptQuality(prompt: string, runtime: GenerateRuntimeConfig): 
     issues.push(`命中敏感词：${hits.join('、')}`)
   }
   return issues
+}
+
+function parseTemplateVariableMap(raw: string): Record<string, string> {
+  const map: Record<string, string> = {}
+  const lines = raw
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean)
+  for (const line of lines) {
+    const divider = line.includes('=') ? '=' : ':'
+    const index = line.indexOf(divider)
+    if (index <= 0) {
+      continue
+    }
+    const key = line.slice(0, index).trim()
+    const value = line.slice(index + 1).trim()
+    if (!key || !value) {
+      continue
+    }
+    map[key] = value
+  }
+  return map
+}
+
+function replaceTemplateVariables(text: string, variables: Record<string, string>): string {
+  let output = text
+  for (const [key, value] of Object.entries(variables)) {
+    const pattern = new RegExp(`\\{\\s*${key.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\s*\\}`, 'g')
+    output = output.replace(pattern, value)
+  }
+  return output
+}
+
+function recommendConfigByPrompt(prompt: string): Partial<GenerationConfig> {
+  const lower = prompt.toLowerCase()
+  if (/海报|poster|kv|品牌|广告/.test(lower)) {
+    return {
+      style: 'editorial',
+      resolution: '2048x2048',
+      quality: 'high',
+      aspectRatio: '1:1',
+    }
+  }
+  if (/人像|portrait|脸部|模特/.test(lower)) {
+    return {
+      style: 'cinematic',
+      resolution: '1024x1536',
+      quality: 'high',
+      aspectRatio: '3:2',
+    }
+  }
+  if (/建筑|场景|街景|city|architecture/.test(lower)) {
+    return {
+      style: 'photoreal',
+      resolution: '1536x1024',
+      quality: 'high',
+      aspectRatio: '16:9',
+    }
+  }
+  if (/插画|anime|二次元|fantasy/.test(lower)) {
+    return {
+      style: 'illustration',
+      resolution: '1024x1024',
+      quality: 'high',
+      aspectRatio: '1:1',
+    }
+  }
+  return {
+    style: 'auto',
+    resolution: '1024x1024',
+    quality: 'standard',
+    aspectRatio: 'auto',
+  }
+}
+
+function translatePromptHeuristic(prompt: string, target: 'en' | 'zh'): string {
+  const dictionary: Array<[RegExp, string]> = target === 'en'
+    ? [
+        [/人像/g, 'portrait'],
+        [/赛博/g, 'cyberpunk'],
+        [/电影感/g, 'cinematic'],
+        [/高细节/g, 'high detail'],
+        [/柔光/g, 'soft lighting'],
+        [/体积光/g, 'volumetric lighting'],
+        [/超清/g, 'ultra-detailed'],
+      ]
+    : [
+        [/portrait/gi, '人像'],
+        [/cyberpunk/gi, '赛博'],
+        [/cinematic/gi, '电影感'],
+        [/high detail/gi, '高细节'],
+        [/soft lighting/gi, '柔光'],
+        [/volumetric lighting/gi, '体积光'],
+        [/ultra-detailed/gi, '超清'],
+      ]
+  let output = prompt
+  for (const [pattern, replacement] of dictionary) {
+    output = output.replace(pattern, replacement)
+  }
+  return output
+}
+
+function buildAutoFileName(
+  pattern: string,
+  context: {
+    index: number
+    model: string
+    prompt: string
+    extension: string
+  },
+): string {
+  const date = new Date()
+  const dateToken = `${date.getFullYear()}${String(date.getMonth() + 1).padStart(2, '0')}${String(
+    date.getDate(),
+  ).padStart(2, '0')}`
+  const promptTag = context.prompt
+    .replace(/[^\u4e00-\u9fa5a-zA-Z0-9]+/g, '-')
+    .replace(/-+/g, '-')
+    .replace(/^-|-$/g, '')
+    .slice(0, 20) || 'image'
+  const base = pattern
+    .replace(/\{date\}/g, dateToken)
+    .replace(/\{index\}/g, String(context.index + 1).padStart(3, '0'))
+    .replace(/\{model\}/g, context.model.replace(/[^\w-]+/g, '-'))
+    .replace(/\{tag\}/g, promptTag)
+  return `${base}.${context.extension}`
+}
+
+async function getImageHash(src: string): Promise<string> {
+  const image = await new Promise<HTMLImageElement>((resolve, reject) => {
+    const img = new Image()
+    img.crossOrigin = 'anonymous'
+    img.onload = () => resolve(img)
+    img.onerror = () => reject(new Error('load failed'))
+    img.src = src
+  })
+  const canvas = document.createElement('canvas')
+  canvas.width = 8
+  canvas.height = 8
+  const ctx = canvas.getContext('2d')
+  if (!ctx) {
+    throw new Error('no canvas context')
+  }
+  ctx.drawImage(image, 0, 0, 8, 8)
+  const data = ctx.getImageData(0, 0, 8, 8).data
+  const values: number[] = []
+  for (let i = 0; i < data.length; i += 4) {
+    const gray = Math.round((data[i] + data[i + 1] + data[i + 2]) / 3)
+    values.push(gray)
+  }
+  const avg = values.reduce((sum, value) => sum + value, 0) / values.length
+  return values.map((value) => (value >= avg ? '1' : '0')).join('')
+}
+
+function hammingDistance(a: string, b: string): number {
+  if (a.length !== b.length) {
+    return Number.MAX_SAFE_INTEGER
+  }
+  let count = 0
+  for (let i = 0; i < a.length; i += 1) {
+    if (a[i] !== b[i]) {
+      count += 1
+    }
+  }
+  return count
 }
 
 function utf8Bytes(text: string): Uint8Array {
@@ -1999,7 +2324,7 @@ async function prepareRequest(
   }
 }
 
-async function downloadImage(image: StudioImage): Promise<void> {
+async function downloadImage(image: StudioImage, fileName?: string): Promise<void> {
   const response = await fetch(image.src)
   const blob = await response.blob()
   const objectUrl = URL.createObjectURL(blob)
@@ -2010,7 +2335,7 @@ async function downloadImage(image: StudioImage): Promise<void> {
       ? 'webp'
       : 'png'
   anchor.href = objectUrl
-  anchor.download = `aurora-${Date.now()}.${extension}`
+  anchor.download = fileName || `aurora-${Date.now()}.${extension}`
   document.body.appendChild(anchor)
   anchor.click()
   anchor.remove()
@@ -2047,6 +2372,25 @@ function App() {
   )
   const [workspaceNameInput, setWorkspaceNameInput] = useState('')
   const [sseEvents, setSseEvents] = useState<StreamEventTrace[]>([])
+  const [endpointHealth, setEndpointHealth] = useState<EndpointHealth[]>([])
+  const [templateVariablesText, setTemplateVariablesText] = useState('主体=未来城市\n风格=电影感')
+  const [templateVersions, setTemplateVersions] = useState<Record<string, string[]>>(() =>
+    readTemplateVersionStore(),
+  )
+  const [templateVersionSelection, setTemplateVersionSelection] = useState<Record<string, number>>({})
+  const [promptAutocompleteEnabled, setPromptAutocompleteEnabled] = useState(true)
+  const [imageMetadataMap, setImageMetadataMap] = useState<Record<string, ImageMetadata>>({})
+  const [imageHashMap, setImageHashMap] = useState<Record<string, string>>({})
+  const [duplicateImageSet, setDuplicateImageSet] = useState<Record<string, true>>({})
+  const [approvalState, setApprovalState] = useState<Record<string, 'pending' | 'approved' | 'rejected'>>({})
+  const [publishedImages, setPublishedImages] = useState<string[]>(() => readStoredPublished())
+  const [abPromptB, setAbPromptB] = useState('')
+  const [abReport, setAbReport] = useState<AbReport | null>(null)
+  const [comparePick, setComparePick] = useState<string[]>([])
+  const [compareRatio, setCompareRatio] = useState(50)
+  const [compareModalOpen, setCompareModalOpen] = useState(false)
+  const [auditLogs, setAuditLogs] = useState<AuditLogEntry[]>(() => readStoredAuditLogs())
+  const [syncingCloud, setSyncingCloud] = useState(false)
   const [maskEditor, setMaskEditor] = useState<MaskEditorState>(DEFAULT_MASK_EDITOR)
   const [importPromptText, setImportPromptText] = useState('')
   const [layoutCompact, setLayoutCompact] = useState(false)
@@ -2110,6 +2454,18 @@ function App() {
   }, [workspaceProfiles])
 
   useEffect(() => {
+    safeLocalStorageSet(TEMPLATE_VERSION_KEY, JSON.stringify(templateVersions))
+  }, [templateVersions])
+
+  useEffect(() => {
+    safeLocalStorageSet(AUDIT_LOG_KEY, JSON.stringify(auditLogs.slice(0, 200)))
+  }, [auditLogs])
+
+  useEffect(() => {
+    safeLocalStorageSet(PUBLISH_KEY, JSON.stringify(publishedImages.slice(0, 200)))
+  }, [publishedImages])
+
+  useEffect(() => {
     safeLocalStorageSet(HISTORY_KEY, JSON.stringify(sanitizeHistoryForStorage(history)))
   }, [history])
 
@@ -2143,6 +2499,114 @@ function App() {
       // Ignore invalid share payload
     }
   }, [messageApi])
+
+  useEffect(() => {
+    if (!runtimeConfig.endpointProbeEnabled) {
+      return
+    }
+    let cancelled = false
+    const probe = async () => {
+      const urls = [connection.baseUrl, ...normalizeUrlLines(runtimeConfig.fallbackBaseUrls)].filter(
+        (item, index, list) => item.trim() && list.indexOf(item) === index,
+      )
+      if (urls.length === 0) {
+        return
+      }
+      const results: EndpointHealth[] = []
+      for (const base of urls) {
+        const endpoint = buildUrl(resolveRuntimeBaseUrl(base), connection.modelsPath || '/models')
+        const headers: Record<string, string> = parseExtraHeaders(connection.extraHeaders)
+        if (connection.authMode === 'bearer' && connection.apiKey.trim()) {
+          headers.Authorization = `Bearer ${connection.apiKey.trim()}`
+        }
+        const started = performance.now()
+        try {
+          const response = await fetch(endpoint, {
+            method: 'GET',
+            headers,
+          })
+          const latency = Math.round(performance.now() - started)
+          results.push({
+            url: base,
+            ok: response.ok || response.status < 500,
+            latencyMs: latency,
+            statusCode: response.status,
+            checkedAt: new Date().toISOString(),
+          })
+        } catch {
+          results.push({
+            url: base,
+            ok: false,
+            latencyMs: 9999,
+            statusCode: 0,
+            checkedAt: new Date().toISOString(),
+          })
+        }
+      }
+      if (!cancelled) {
+        setEndpointHealth(results)
+      }
+    }
+    void probe()
+    const timer = window.setInterval(() => {
+      void probe()
+    }, Math.max(5, runtimeConfig.endpointProbeIntervalSec) * 1000)
+    return () => {
+      cancelled = true
+      window.clearInterval(timer)
+    }
+  }, [
+    connection.apiKey,
+    connection.authMode,
+    connection.baseUrl,
+    connection.extraHeaders,
+    connection.modelsPath,
+    runtimeConfig.endpointProbeEnabled,
+    runtimeConfig.endpointProbeIntervalSec,
+    runtimeConfig.fallbackBaseUrls,
+  ])
+
+  useEffect(() => {
+    let cancelled = false
+    const calculateHashes = async () => {
+      const nextMap: Record<string, string> = { ...imageHashMap }
+      let mapChanged = false
+      for (const image of images) {
+        if (nextMap[image.src]) {
+          continue
+        }
+        try {
+          nextMap[image.src] = await getImageHash(image.src)
+          mapChanged = true
+        } catch {
+          // ignore invalid/cross origin image hash errors
+        }
+      }
+      if (cancelled) {
+        return
+      }
+      const duplicates: Record<string, true> = {}
+      const keys = images.map((item) => item.src).filter((src) => nextMap[src])
+      for (let i = 0; i < keys.length; i += 1) {
+        for (let j = i + 1; j < keys.length; j += 1) {
+          const distance = hammingDistance(nextMap[keys[i]], nextMap[keys[j]])
+          if (distance <= runtimeConfig.similarityThreshold) {
+            duplicates[keys[j]] = true
+          }
+        }
+      }
+      if (mapChanged) {
+        setImageHashMap(nextMap)
+      }
+      setDuplicateImageSet(duplicates)
+    }
+    if (images.length > 0) {
+      void calculateHashes()
+    }
+    return () => {
+      cancelled = true
+    }
+  }, [images, imageHashMap, runtimeConfig.similarityThreshold])
 
   const providerModelOptions = useMemo(
     () => (connection.provider === 'openai' ? OPENAI_MODELS : GEMINI_MODELS),
@@ -2261,12 +2725,51 @@ function App() {
     })
   }, [history, historyFilter])
 
+  const templateVariables = useMemo(
+    () => parseTemplateVariableMap(templateVariablesText),
+    [templateVariablesText],
+  )
+
+  const promptAutoSuggestions = useMemo(() => {
+    const suggestions = [
+      'cinematic lighting',
+      '85mm portrait',
+      'volumetric lighting',
+      'ultra detail skin texture',
+      'rule of thirds composition',
+      'global illumination',
+      'golden hour',
+      'clean background',
+      'color grading',
+      'studio product shot',
+    ]
+    const lowerPrompt = generation.prompt.toLowerCase()
+    return suggestions
+      .filter((item) => !lowerPrompt.includes(item.toLowerCase()))
+      .slice(0, 8)
+  }, [generation.prompt])
+
   const visibleImages = useMemo(() => {
-    if (!showOnlyKeptImages) {
-      return images
+    let list = images
+    if (showOnlyKeptImages) {
+      list = list.filter((image) => imageReviews[image.src]?.decision === 'keep')
     }
-    return images.filter((image) => imageReviews[image.src]?.decision === 'keep')
-  }, [images, imageReviews, showOnlyKeptImages])
+    if (runtimeConfig.similarityDedupeEnabled) {
+      list = list.filter((image) => !duplicateImageSet[image.src])
+    }
+    if (runtimeConfig.approvalFlowEnabled) {
+      list = list.filter((image) => approvalState[image.src] !== 'rejected')
+    }
+    return list
+  }, [
+    images,
+    imageReviews,
+    showOnlyKeptImages,
+    runtimeConfig.similarityDedupeEnabled,
+    runtimeConfig.approvalFlowEnabled,
+    duplicateImageSet,
+    approvalState,
+  ])
 
   const promptTemplateById = useMemo(
     () => new Map(PROMPT_TEMPLATE_LIBRARY.map((item) => [item.id, item])),
@@ -2341,10 +2844,66 @@ function App() {
     return list
   }, [promptTemplateById, promptTemplateStore.recent])
 
+  const addAuditLog = (action: string, detail: string) => {
+    setAuditLogs((previous) => [
+      {
+        id: crypto.randomUUID(),
+        at: new Date().toISOString(),
+        action,
+        detail,
+      },
+      ...previous,
+    ].slice(0, 200))
+  }
+
+  const resolveTemplatePrompt = (template: PromptTemplate): string => {
+    const versionList = templateVersions[template.id] ?? [template.prompt]
+    const index = templateVersionSelection[template.id] ?? 0
+    const selected = versionList[index] ?? versionList[0] ?? template.prompt
+    return runtimeConfig.templateVariablesEnabled
+      ? replaceTemplateVariables(selected, templateVariables)
+      : selected
+  }
+
+  const saveTemplateVersionFromCurrentPrompt = (templateId: string) => {
+    const currentPrompt = generation.prompt.trim()
+    if (!currentPrompt) {
+      messageApi.warning('当前提示词为空，无法存为模板版本')
+      return
+    }
+    setTemplateVersions((previous) => {
+      const currentVersions = previous[templateId] ?? [promptTemplateById.get(templateId)?.prompt ?? '']
+      const next = [currentPrompt, ...currentVersions.filter((item) => item !== currentPrompt)].slice(0, 12)
+      return {
+        ...previous,
+        [templateId]: next,
+      }
+    })
+    setTemplateVersionSelection((previous) => ({
+      ...previous,
+      [templateId]: 0,
+    }))
+    addAuditLog('template.version.save', `模板 ${templateId} 保存了新版本`)
+    messageApi.success('已保存为新模板版本')
+  }
+
+  const rollbackTemplateVersion = (templateId: string) => {
+    setTemplateVersionSelection((previous) => {
+      const current = previous[templateId] ?? 0
+      const next = Math.max(0, current + 1)
+      return {
+        ...previous,
+        [templateId]: next,
+      }
+    })
+    addAuditLog('template.version.rollback', `模板 ${templateId} 回滚到旧版本`)
+  }
+
   const applyPromptTemplate = (template: PromptTemplate) => {
+    const resolvedPrompt = resolveTemplatePrompt(template)
     setGeneration((previous) => ({
       ...previous,
-      prompt: template.prompt,
+      prompt: resolvedPrompt,
       negativePrompt: template.negativePrompt ?? previous.negativePrompt,
       style:
         previous.style === 'auto'
@@ -2355,6 +2914,7 @@ function App() {
       ...previous,
       recent: [template.id, ...previous.recent.filter((item) => item !== template.id)].slice(0, 20),
     }))
+    addAuditLog('template.apply', `套用模板 ${template.label}`)
     messageApi.success(`已套用模板：${template.label}`)
   }
 
@@ -2398,6 +2958,7 @@ function App() {
         ...previous,
       ].slice(0, 30)
     })
+    addAuditLog('preset.save', `保存参数预设 ${name}`)
     messageApi.success(`已保存参数预设：${name}`)
   }
 
@@ -2408,6 +2969,7 @@ function App() {
     }
     setGeneration(matched.generation)
     setBatchConfig(matched.batch)
+    addAuditLog('preset.apply', `套用参数预设 ${matched.name}`)
     messageApi.success(`已套用预设：${matched.name}`)
   }
 
@@ -2415,6 +2977,7 @@ function App() {
     const matched = presets.find((item) => item.id === presetId)
     setPresets((previous) => previous.filter((item) => item.id !== presetId))
     if (matched) {
+      addAuditLog('preset.remove', `删除参数预设 ${matched.name}`)
       messageApi.success(`已删除预设：${matched.name}`)
     }
   }
@@ -2513,6 +3076,7 @@ function App() {
       return
     }
     setHistory((previous) => previous.filter((item) => !historySelection.includes(item.id)))
+    addAuditLog('history.delete.batch', `删除历史 ${historySelection.length} 条`)
     setHistorySelection([])
     messageApi.success(`已删除 ${historySelection.length} 条历史记录`)
   }
@@ -2549,7 +3113,12 @@ function App() {
               ? 'webp'
               : 'png'
           files.push({
-            name: `images/${String(index + 1).padStart(3, '0')}.${extension}`,
+            name: `images/${buildAutoFileName(runtimeConfig.autoNamePattern, {
+              index,
+              model: connection.model,
+              prompt: generation.prompt,
+              extension,
+            })}`,
             data: bytes,
           })
           downloaded += 1
@@ -2574,6 +3143,228 @@ function App() {
     } catch {
       messageApi.error('导出 ZIP 失败，请稍后重试')
     }
+  }
+
+  const downloadWithAutoName = async (image: StudioImage) => {
+    const index = images.findIndex((item) => item.id === image.id)
+    const extension = image.mimeType.includes('jpeg')
+      ? 'jpg'
+      : image.mimeType.includes('webp')
+        ? 'webp'
+        : 'png'
+    const fileName = buildAutoFileName(runtimeConfig.autoNamePattern, {
+      index: index >= 0 ? index : 0,
+      model: connection.model,
+      prompt: generation.prompt,
+      extension,
+    })
+    await downloadImage(image, fileName)
+  }
+
+  const applySmartRecommendation = () => {
+    const next = recommendConfigByPrompt(generation.prompt)
+    setGeneration((previous) => ({
+      ...previous,
+      ...next,
+    }))
+    addAuditLog('generation.recommend', '按提示词自动推荐了参数')
+    messageApi.success('已按提示词应用推荐参数')
+  }
+
+  const applyPromptTranslate = (target: 'en' | 'zh') => {
+    const translated = translatePromptHeuristic(generation.prompt, target)
+    setGeneration((previous) => ({
+      ...previous,
+      prompt: translated,
+    }))
+    addAuditLog('prompt.translate', `提示词翻译到 ${target}`)
+    messageApi.success(target === 'en' ? '已转换为英文提示词' : '已转换为中文提示词')
+  }
+
+  const pushWebhookEvent = async (eventName: string, payload: Record<string, unknown>) => {
+    const webhookUrl = runtimeConfig.webhookUrl.trim()
+    if (!webhookUrl) {
+      return
+    }
+    try {
+      await fetch(webhookUrl, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          event: eventName,
+          at: new Date().toISOString(),
+          payload,
+        }),
+      })
+    } catch {
+      // ignore webhook failures to avoid interrupting generation flow
+    }
+  }
+
+  const syncHistoryToCloud = async () => {
+    const url = runtimeConfig.cloudSyncUrl.trim()
+    if (!url) {
+      messageApi.error('请先填写云同步 URL')
+      return
+    }
+    setSyncingCloud(true)
+    try {
+      const response = await fetch(url, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          ...(runtimeConfig.cloudSyncToken.trim()
+            ? { Authorization: `Bearer ${runtimeConfig.cloudSyncToken.trim()}` }
+            : {}),
+        },
+        body: JSON.stringify({
+          history: sanitizeHistoryForStorage(history),
+        }),
+      })
+      if (!response.ok) {
+        throw new Error(`HTTP ${response.status}`)
+      }
+      addAuditLog('history.sync.push', `上传历史 ${history.length} 条`)
+      messageApi.success('历史已同步到云端')
+    } catch (error) {
+      messageApi.error(`云同步失败：${error instanceof Error ? error.message : 'unknown'}`)
+    } finally {
+      setSyncingCloud(false)
+    }
+  }
+
+  const pullHistoryFromCloud = async () => {
+    const url = runtimeConfig.cloudSyncUrl.trim()
+    if (!url) {
+      messageApi.error('请先填写云同步 URL')
+      return
+    }
+    setSyncingCloud(true)
+    try {
+      const response = await fetch(url, {
+        method: 'GET',
+        headers: {
+          ...(runtimeConfig.cloudSyncToken.trim()
+            ? { Authorization: `Bearer ${runtimeConfig.cloudSyncToken.trim()}` }
+            : {}),
+        },
+      })
+      if (!response.ok) {
+        throw new Error(`HTTP ${response.status}`)
+      }
+      const payload = safeJsonParse(await response.text())
+      if (isRecord(payload) && Array.isArray(payload.history)) {
+        const merged = [...payload.history, ...history]
+          .filter((item) => isRecord(item))
+          .slice(0, 80)
+          .map((item) => ({
+            id: typeof item.id === 'string' ? item.id : crypto.randomUUID(),
+            createdAt: typeof item.createdAt === 'string' ? item.createdAt : new Date().toISOString(),
+            provider: item.provider === 'gemini' ? 'gemini' : 'openai',
+            model: typeof item.model === 'string' ? item.model : '',
+            mode: item.mode === 'image-to-image' ? 'image-to-image' : 'text-to-image',
+            prompt: typeof item.prompt === 'string' ? item.prompt : '',
+            folder: typeof item.folder === 'string' ? item.folder : '',
+            tags: Array.isArray(item.tags)
+              ? item.tags.filter((tag): tag is string => typeof tag === 'string').slice(0, 8)
+              : [],
+            endpoint: typeof item.endpoint === 'string' ? item.endpoint : '',
+            status: item.status === 'error' ? 'error' : 'success',
+            statusCode: typeof item.statusCode === 'number' ? item.statusCode : undefined,
+            latencyMs: typeof item.latencyMs === 'number' ? item.latencyMs : undefined,
+            images: Array.isArray(item.images)
+              ? item.images
+                  .filter((image) => isRecord(image))
+                  .map((image, index) => ({
+                    id: typeof image.id === 'string' ? image.id : `cloud-${index}`,
+                    src: typeof image.src === 'string' ? image.src : '',
+                    mimeType: typeof image.mimeType === 'string' ? image.mimeType : 'image/png',
+                  }))
+                  .filter((image) => image.src)
+              : [],
+            imageCount: typeof item.imageCount === 'number' ? item.imageCount : 0,
+            note: typeof item.note === 'string' ? item.note : '',
+            responseSnippet: typeof item.responseSnippet === 'string' ? item.responseSnippet : '',
+          } satisfies HistoryRecord))
+        setHistory(merged)
+      }
+      addAuditLog('history.sync.pull', '从云端拉取历史记录')
+      messageApi.success('已从云端拉取历史')
+    } catch (error) {
+      messageApi.error(`拉取失败：${error instanceof Error ? error.message : 'unknown'}`)
+    } finally {
+      setSyncingCloud(false)
+    }
+  }
+
+  const toggleComparePick = (image: StudioImage) => {
+    setComparePick((previous) => {
+      if (previous.includes(image.src)) {
+        return previous.filter((item) => item !== image.src)
+      }
+      const next = [...previous, image.src]
+      return next.slice(-2)
+    })
+  }
+
+  const openCompareModal = () => {
+    if (comparePick.length < 2) {
+      messageApi.warning('请选择两张图片再对比')
+      return
+    }
+    setCompareModalOpen(true)
+  }
+
+  const publishImage = (image: StudioImage) => {
+    setPublishedImages((previous) => (previous.includes(image.src) ? previous : [image.src, ...previous]).slice(0, 200))
+    addAuditLog('image.publish', `发布图片 ${image.id}`)
+    messageApi.success('已加入发布看板')
+  }
+
+  const generateAbReport = () => {
+    const promptA = generation.prompt.trim()
+    const promptB = abPromptB.trim()
+    if (!promptA || !promptB) {
+      messageApi.warning('请先填写 A/B 两条提示词')
+      return
+    }
+    const calc = (prompt: string) => {
+      const rows = history.filter((item) => item.prompt.includes(prompt))
+      const count = rows.length
+      const success = rows.filter((item) => item.status === 'success').length
+      const successRate = count > 0 ? Math.round((success / count) * 100) : 0
+      const latencies = rows.map((item) => item.latencyMs).filter((item): item is number => typeof item === 'number')
+      const avgLatency = latencies.length > 0 ? Math.round(latencies.reduce((sum, value) => sum + value, 0) / latencies.length) : 0
+      let totalRating = 0
+      let ratingCount = 0
+      for (const row of rows) {
+        for (const image of row.images) {
+          const rating = imageReviews[image.src]?.rating ?? 0
+          if (rating > 0) {
+            totalRating += rating
+            ratingCount += 1
+          }
+        }
+      }
+      const avgRating = ratingCount > 0 ? Number((totalRating / ratingCount).toFixed(2)) : 0
+      return { count, successRate, avgLatency, avgRating }
+    }
+    const a = calc(promptA)
+    const b = calc(promptB)
+    setAbReport({
+      promptA,
+      promptB,
+      countA: a.count,
+      countB: b.count,
+      successRateA: a.successRate,
+      successRateB: b.successRate,
+      avgLatencyA: a.avgLatency,
+      avgLatencyB: b.avgLatency,
+      avgRatingA: a.avgRating,
+      avgRatingB: b.avgRating,
+    })
   }
 
   const handleProviderChange = (nextProvider: string) => {
@@ -2657,7 +3448,10 @@ function App() {
       return
     }
 
-    const promptQueue = buildBatchPromptQueue(batchConfig, generation.prompt)
+    const rawPromptQueue = buildBatchPromptQueue(batchConfig, generation.prompt)
+    const promptQueue = runtimeConfig.templateVariablesEnabled
+      ? rawPromptQueue.map((item) => replaceTemplateVariables(item, templateVariables))
+      : rawPromptQueue
     if (batchConfig.mode === 'prompt-list' && promptQueue.length === 0) {
       messageApi.error('批量提示词为空，请每行填写一条提示词')
       return
@@ -2706,10 +3500,29 @@ function App() {
       return
     }
 
-    const baseCandidates = [
+    const baseCandidatesRaw = [
       connection.baseUrl,
       ...normalizeUrlLines(runtimeConfig.fallbackBaseUrls),
     ].filter((item, index, list) => item.trim() && list.indexOf(item) === index)
+    const baseCandidates = runtimeConfig.autoSelectBestEndpoint
+      ? [...baseCandidatesRaw].sort((a, b) => {
+          const healthA = endpointHealth.find((item) => item.url === a)
+          const healthB = endpointHealth.find((item) => item.url === b)
+          if (!healthA && !healthB) {
+            return 0
+          }
+          if (!healthA) {
+            return 1
+          }
+          if (!healthB) {
+            return -1
+          }
+          if (healthA.ok !== healthB.ok) {
+            return healthA.ok ? -1 : 1
+          }
+          return healthA.latencyMs - healthB.latencyMs
+        })
+      : baseCandidatesRaw
 
     const historyTags = historyTagsInput
       .split(/[,，\s]+/)
@@ -2780,6 +3593,8 @@ function App() {
     let lastAttemptLatencyMs: number | undefined
     const aggregatedImages: StudioImage[] = []
     const textualSummaries: string[] = []
+    let dynamicSource: ImageSourceState = source
+    addAuditLog('generation.start', `开始生成任务 ${jobs.length} 条`)
 
     try {
       for (let taskIndex = 0; taskIndex < jobs.length; taskIndex += 1) {
@@ -2814,7 +3629,7 @@ function App() {
                 mode,
                 connection,
                 generation,
-                source,
+                dynamicSource,
                 candidateModel,
                 taskPrompt,
                 {
@@ -2847,10 +3662,32 @@ function App() {
                 ),
               )
 
-              const response = await fetch(request.endpoint, {
-                ...request.init,
-                signal: controller.signal,
-              })
+              let response: Response | null = null
+              let retryError = ''
+              for (let retryIndex = 0; retryIndex <= runtimeConfig.maxRetries; retryIndex += 1) {
+                try {
+                  const candidateResponse = await fetch(request.endpoint, {
+                    ...request.init,
+                    signal: controller.signal,
+                  })
+                  response = candidateResponse
+                  if (candidateResponse.status >= 500 && retryIndex < runtimeConfig.maxRetries) {
+                    await sleep(runtimeConfig.retryBackoffMs * (retryIndex + 1))
+                    continue
+                  }
+                  break
+                } catch (error) {
+                  retryError = error instanceof Error ? error.message : 'network error'
+                  if (retryIndex < runtimeConfig.maxRetries) {
+                    await sleep(runtimeConfig.retryBackoffMs * (retryIndex + 1))
+                    continue
+                  }
+                }
+              }
+              if (!response) {
+                taskFailureMessage = `请求失败（重试后仍失败）：${retryError}`
+                continue
+              }
               lastStatusCode = response.status
               lastAttemptLatencyMs = Math.round(performance.now() - attemptStartedAt)
               const responseContentType = (response.headers.get('content-type') ?? '').toLowerCase()
@@ -2960,6 +3797,33 @@ function App() {
                 responseSnippet: raw.slice(0, 1600),
               })
 
+              setImageMetadataMap((previous) => {
+                const next = { ...previous }
+                const metadata: ImageMetadata = {
+                  prompt: taskPrompt,
+                  model: candidateModel,
+                  seedLabel: job.seedLabel,
+                  latencyMs: lastAttemptLatencyMs,
+                  resolution: generation.resolution,
+                  endpoint: request.endpoint,
+                  createdAt: new Date().toISOString(),
+                }
+                for (const image of nextImages) {
+                  next[image.src] = metadata
+                }
+                return next
+              })
+
+              setApprovalState((previous) => {
+                const next = { ...previous }
+                for (const image of nextImages) {
+                  if (!next[image.src]) {
+                    next[image.src] = runtimeConfig.approvalFlowEnabled ? 'pending' : 'approved'
+                  }
+                }
+                return next
+              })
+
               setUsageStore((previous) =>
                 updateUsageStore(previous, connection.provider, nextImages.length, generation.quality),
               )
@@ -2984,6 +3848,17 @@ function App() {
                     : item,
                 ),
               )
+
+              if (runtimeConfig.dependencyChainEnabled && mode === 'image-to-image') {
+                const nextReference = nextImages[0]?.src
+                if (nextReference) {
+                  dynamicSource = {
+                    file: null,
+                    previewUrl: '',
+                    imageUrl: nextReference,
+                  }
+                }
+              }
 
               taskSucceeded = true
               break
@@ -3042,6 +3917,12 @@ function App() {
           ? `批量生图完成（${jobs.length} 条任务）`
           : '生图完成',
       )
+      addAuditLog('generation.success', `成功生成 ${aggregatedImages.length} 张图`)
+      void pushWebhookEvent('generation.success', {
+        jobs: jobs.length,
+        imageCount: aggregatedImages.length,
+        model: connection.model,
+      })
     } catch (error) {
       const failureMessage =
         error instanceof Error ? error.message : '生成失败，请检查配置后重试'
@@ -3095,6 +3976,12 @@ function App() {
         responseSnippet: readableMessage.slice(0, 1600),
       })
 
+      addAuditLog('generation.error', readableMessage)
+      void pushWebhookEvent('generation.error', {
+        message: readableMessage,
+        model: attemptedModel,
+        endpoint: attemptedEndpoint,
+      })
       messageApi.error(readableMessage)
     } finally {
       setIsGenerating(false)
@@ -3313,10 +4200,13 @@ function App() {
       }
 
       if (matchedResponse.ok) {
+        addAuditLog('connection.test.success', `${matchedEndpoint} -> ${matchedResponse.status}`)
         messageApi.success(info)
       } else if (reachable) {
+        addAuditLog('connection.test.warn', `${matchedEndpoint} -> ${matchedResponse.status}`)
         messageApi.warning(info)
       } else {
+        addAuditLog('connection.test.error', `${matchedEndpoint} -> ${matchedResponse.status}`)
         messageApi.error(info)
       }
     } catch (error) {
@@ -3331,6 +4221,7 @@ function App() {
         endpoint: primaryEndpoint,
       })
       setResponseText(`${text}\n${detail}`)
+      addAuditLog('connection.test.error', `${primaryEndpoint} -> ${detail}`)
       messageApi.error(text)
     } finally {
       window.clearTimeout(timer)
@@ -3519,6 +4410,14 @@ function App() {
               <div className="template-grid">
                 {filteredPromptTemplates.map((template) => {
                   const isFavorite = favoriteTemplateSet.has(template.id)
+                  const versionList = templateVersions[template.id] ?? [template.prompt]
+                  const selectedVersionIndex = Math.min(
+                    templateVersionSelection[template.id] ?? 0,
+                    Math.max(0, versionList.length - 1),
+                  )
+                  const resolvedPreview = runtimeConfig.templateVariablesEnabled
+                    ? replaceTemplateVariables(versionList[selectedVersionIndex] ?? template.prompt, templateVariables)
+                    : versionList[selectedVersionIndex] ?? template.prompt
                   return (
                     <article key={template.id} className="template-item">
                       <div className="template-item-main">
@@ -3530,8 +4429,26 @@ function App() {
                           </Space>
                         </div>
                         <Paragraph className="template-item-prompt" ellipsis={{ rows: 2 }}>
-                          {template.prompt}
+                          {resolvedPreview}
                         </Paragraph>
+                        <Space size={6} wrap>
+                          <Tag color="purple">版本 {selectedVersionIndex + 1}/{versionList.length}</Tag>
+                          <Select
+                            size="small"
+                            value={selectedVersionIndex}
+                            style={{ width: 132 }}
+                            options={versionList.map((_, index) => ({
+                              label: `v${index + 1}${index === 0 ? ' (最新)' : ''}`,
+                              value: index,
+                            }))}
+                            onChange={(value) =>
+                              setTemplateVersionSelection((previous) => ({
+                                ...previous,
+                                [template.id]: Number(value),
+                              }))
+                            }
+                          />
+                        </Space>
                         <Space wrap size={[6, 6]}>
                           {template.tags.map((tag) => (
                             <Tag key={`${template.id}-${tag}`}>{tag}</Tag>
@@ -3552,6 +4469,18 @@ function App() {
                           onClick={() => toggleFavoriteTemplate(template.id)}
                         >
                           {isFavorite ? '取消收藏' : '收藏'}
+                        </Button>
+                        <Button
+                          size="small"
+                          onClick={() => saveTemplateVersionFromCurrentPrompt(template.id)}
+                        >
+                          存新版本
+                        </Button>
+                        <Button
+                          size="small"
+                          onClick={() => rollbackTemplateVersion(template.id)}
+                        >
+                          回滚
                         </Button>
                       </div>
                     </article>
@@ -3579,6 +4508,23 @@ function App() {
           </div>
 
           <Text className="field-label">提示词</Text>
+          <Space wrap size={8}>
+            <Button size="small" onClick={applySmartRecommendation}>
+              智能参数推荐
+            </Button>
+            <Button size="small" onClick={() => applyPromptTranslate('en')}>
+              中 → 英增强
+            </Button>
+            <Button size="small" onClick={() => applyPromptTranslate('zh')}>
+              英 → 中整理
+            </Button>
+            <Checkbox
+              checked={promptAutocompleteEnabled}
+              onChange={(event) => setPromptAutocompleteEnabled(event.target.checked)}
+            >
+              自动补全建议
+            </Checkbox>
+          </Space>
           <Input.TextArea
             className="prompt-main-input"
             value={generation.prompt}
@@ -3588,6 +4534,49 @@ function App() {
             autoSize={{ minRows: 7, maxRows: 18 }}
             placeholder="描述画面主体、镜头、光影、材质和情绪..."
           />
+          <div className="template-vars-box">
+            <Space wrap size={8}>
+              <Checkbox
+                checked={runtimeConfig.templateVariablesEnabled}
+                onChange={(event) =>
+                  setRuntimeConfig((previous) => ({
+                    ...previous,
+                    templateVariablesEnabled: event.target.checked,
+                  }))
+                }
+              >
+                启用模板变量（{`{主体}`},{`{风格}`},...）
+              </Checkbox>
+              <Tag>变量数 {Object.keys(templateVariables).length}</Tag>
+            </Space>
+            <Input.TextArea
+              value={templateVariablesText}
+              onChange={(event) => setTemplateVariablesText(event.target.value)}
+              autoSize={{ minRows: 2, maxRows: 5 }}
+              placeholder={'主体=未来机械城市\n风格=cinematic lighting'}
+            />
+          </div>
+          {promptAutocompleteEnabled && promptAutoSuggestions.length > 0 ? (
+            <div className="prompt-suggestions">
+              <Text type="secondary">自动补全建议：</Text>
+              <Space wrap size={[6, 6]}>
+                {promptAutoSuggestions.map((item) => (
+                  <Button
+                    key={item}
+                    size="small"
+                    onClick={() =>
+                      setGeneration((previous) => ({
+                        ...previous,
+                        prompt: `${previous.prompt.trim()}${previous.prompt.trim() ? ', ' : ''}${item}`,
+                      }))
+                    }
+                  >
+                    + {item}
+                  </Button>
+                ))}
+              </Space>
+            </div>
+          ) : null}
 
           <Text className="field-label">负向提示词</Text>
           <Input.TextArea
@@ -3818,6 +4807,10 @@ function App() {
                   setUploadAnalysis(null)
                   setImages([])
                   setQueueTasks([])
+                  setComparePick([])
+                  setCompareModalOpen(false)
+                  setImageMetadataMap({})
+                  setApprovalState({})
                   setRunState(INITIAL_RUN_STATE)
                   setRequestPreview('')
                   setResponseText('')
@@ -4545,6 +5538,194 @@ function App() {
                   placeholder="备注保护区域，例如：保留主体脸部，重绘背景。"
                 />
               </div>
+
+              <div className="field-block">
+                <Text className="field-label">批量依赖链</Text>
+                <Checkbox
+                  checked={runtimeConfig.dependencyChainEnabled}
+                  onChange={(event) =>
+                    setRuntimeConfig((previous) => ({
+                      ...previous,
+                      dependencyChainEnabled: event.target.checked,
+                    }))
+                  }
+                >
+                  前一张作为后一条参考图
+                </Checkbox>
+              </div>
+
+              <div className="field-block">
+                <Text className="field-label">失败重试次数</Text>
+                <InputNumber
+                  min={0}
+                  max={5}
+                  value={runtimeConfig.maxRetries}
+                  onChange={(value) =>
+                    setRuntimeConfig((previous) => ({
+                      ...previous,
+                      maxRetries: Math.max(0, Math.min(5, Math.floor(Number(value ?? 0)))),
+                    }))
+                  }
+                  style={{ width: '100%' }}
+                />
+              </div>
+              <div className="field-block">
+                <Text className="field-label">重试退避 ms</Text>
+                <InputNumber
+                  min={100}
+                  max={10000}
+                  step={100}
+                  value={runtimeConfig.retryBackoffMs}
+                  onChange={(value) =>
+                    setRuntimeConfig((previous) => ({
+                      ...previous,
+                      retryBackoffMs: Math.max(100, Math.floor(Number(value ?? 100))),
+                    }))
+                  }
+                  style={{ width: '100%' }}
+                />
+              </div>
+              <div className="field-block">
+                <Text className="field-label">自动探活秒数</Text>
+                <InputNumber
+                  min={5}
+                  max={300}
+                  value={runtimeConfig.endpointProbeIntervalSec}
+                  onChange={(value) =>
+                    setRuntimeConfig((previous) => ({
+                      ...previous,
+                      endpointProbeIntervalSec: Math.max(5, Math.floor(Number(value ?? 30))),
+                    }))
+                  }
+                  style={{ width: '100%' }}
+                />
+              </div>
+              <div className="field-block full-width">
+                <Space wrap>
+                  <Checkbox
+                    checked={runtimeConfig.endpointProbeEnabled}
+                    onChange={(event) =>
+                      setRuntimeConfig((previous) => ({
+                        ...previous,
+                        endpointProbeEnabled: event.target.checked,
+                      }))
+                    }
+                  >
+                    启用端点健康探活
+                  </Checkbox>
+                  <Checkbox
+                    checked={runtimeConfig.autoSelectBestEndpoint}
+                    onChange={(event) =>
+                      setRuntimeConfig((previous) => ({
+                        ...previous,
+                        autoSelectBestEndpoint: event.target.checked,
+                      }))
+                    }
+                  >
+                    自动选择最优线路
+                  </Checkbox>
+                  <Checkbox
+                    checked={runtimeConfig.similarityDedupeEnabled}
+                    onChange={(event) =>
+                      setRuntimeConfig((previous) => ({
+                        ...previous,
+                        similarityDedupeEnabled: event.target.checked,
+                      }))
+                    }
+                  >
+                    相似图自动去重
+                  </Checkbox>
+                  <Checkbox
+                    checked={runtimeConfig.approvalFlowEnabled}
+                    onChange={(event) =>
+                      setRuntimeConfig((previous) => ({
+                        ...previous,
+                        approvalFlowEnabled: event.target.checked,
+                      }))
+                    }
+                  >
+                    审批流模式
+                  </Checkbox>
+                </Space>
+              </div>
+              <div className="field-block">
+                <Text className="field-label">去重阈值（越小越严格）</Text>
+                <InputNumber
+                  min={1}
+                  max={32}
+                  value={runtimeConfig.similarityThreshold}
+                  onChange={(value) =>
+                    setRuntimeConfig((previous) => ({
+                      ...previous,
+                      similarityThreshold: Math.max(1, Math.floor(Number(value ?? 6))),
+                    }))
+                  }
+                  style={{ width: '100%' }}
+                />
+              </div>
+
+              <div className="field-block full-width">
+                <Text className="field-label">自动命名规则</Text>
+                <Input
+                  value={runtimeConfig.autoNamePattern}
+                  onChange={(event) =>
+                    setRuntimeConfig((previous) => ({
+                      ...previous,
+                      autoNamePattern: event.target.value,
+                    }))
+                  }
+                  placeholder="{date}-{index}-{model}-{tag}"
+                />
+                <Text type="secondary">支持 token：{'{date}'} {'{index}'} {'{model}'} {'{tag}'}</Text>
+              </div>
+
+              <div className="field-block full-width">
+                <Text className="field-label">云端历史同步 URL</Text>
+                <Input
+                  value={runtimeConfig.cloudSyncUrl}
+                  onChange={(event) =>
+                    setRuntimeConfig((previous) => ({
+                      ...previous,
+                      cloudSyncUrl: event.target.value,
+                    }))
+                  }
+                  placeholder="https://your-api/sync/history"
+                />
+              </div>
+              <div className="field-block full-width">
+                <Text className="field-label">云同步 Token（可选）</Text>
+                <Input.Password
+                  value={runtimeConfig.cloudSyncToken}
+                  onChange={(event) =>
+                    setRuntimeConfig((previous) => ({
+                      ...previous,
+                      cloudSyncToken: event.target.value,
+                    }))
+                  }
+                />
+                <Space>
+                  <Button size="small" loading={syncingCloud} onClick={() => void syncHistoryToCloud()}>
+                    上传历史
+                  </Button>
+                  <Button size="small" loading={syncingCloud} onClick={() => void pullHistoryFromCloud()}>
+                    拉取历史
+                  </Button>
+                </Space>
+              </div>
+
+              <div className="field-block full-width">
+                <Text className="field-label">Webhook 通知地址</Text>
+                <Input
+                  value={runtimeConfig.webhookUrl}
+                  onChange={(event) =>
+                    setRuntimeConfig((previous) => ({
+                      ...previous,
+                      webhookUrl: event.target.value,
+                    }))
+                  }
+                  placeholder="https://hooks.slack.com/... 或企业微信/飞书机器人地址"
+                />
+              </div>
             </div>
           </Card>
         </div>
@@ -4689,6 +5870,177 @@ function App() {
           </Card>
 
           <Card
+            className="studio-card"
+            title={
+              <Space>
+                <ApiOutlined />
+                线路健康与能力矩阵
+              </Space>
+            }
+          >
+            <div className="endpoint-health-list">
+              {endpointHealth.length === 0 ? (
+                <Text type="secondary">探活尚未返回结果。</Text>
+              ) : (
+                endpointHealth.map((item) => (
+                  <div key={item.url} className="endpoint-health-item">
+                    <Space wrap size={6}>
+                      <Tag color={item.ok ? 'green' : 'red'}>{item.ok ? '可用' : '异常'}</Tag>
+                      <Tag>{item.latencyMs}ms</Tag>
+                      <Tag>{item.statusCode || 'ERR'}</Tag>
+                      <Text code>{item.url}</Text>
+                    </Space>
+                    <Text type="secondary">{new Date(item.checkedAt).toLocaleTimeString()}</Text>
+                  </div>
+                ))
+              )}
+            </div>
+            <Divider />
+            <div className="capability-table">
+              {MODEL_CAPABILITY_MATRIX.map((item) => (
+                <div key={item.model} className="capability-row">
+                  <div>
+                    <Text strong>{item.model}</Text>
+                    <div>
+                      <Text type="secondary">{item.provider}</Text>
+                    </div>
+                  </div>
+                  <Tag color="blue">{item.resolutions}</Tag>
+                  <Text>{item.supports}</Text>
+                </div>
+              ))}
+            </div>
+          </Card>
+
+          <Card
+            className="studio-card"
+            title={
+              <Space>
+                <PictureOutlined />
+                审批与发布看板
+              </Space>
+            }
+          >
+            <Space wrap>
+              <Text type="secondary">
+                审批模式：{runtimeConfig.approvalFlowEnabled ? '开启' : '关闭（默认自动通过）'}
+              </Text>
+              <Button size="small" onClick={openCompareModal} disabled={comparePick.length < 2}>
+                打开对比滑块（{comparePick.length}/2）
+              </Button>
+              <Button
+                size="small"
+                onClick={() => setComparePick([])}
+              >
+                清空对比选择
+              </Button>
+            </Space>
+            <div className="publish-board">
+              {publishedImages.length === 0 ? (
+                <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="暂无发布内容" />
+              ) : (
+                <div className="publish-grid">
+                  {publishedImages.slice(0, 24).map((src) => (
+                    <article key={src} className="publish-item">
+                      <img src={src} alt="published item" />
+                      <Space size={6}>
+                        <Button
+                          size="small"
+                          onClick={() =>
+                            setPreviewImage(
+                              images.find((item) => item.src === src) ?? {
+                                id: `published-${src.slice(-12)}`,
+                                src,
+                                mimeType: 'image/png',
+                              },
+                            )
+                          }
+                        >
+                          查看
+                        </Button>
+                        <Button
+                          size="small"
+                          danger
+                          onClick={() =>
+                            setPublishedImages((previous) => previous.filter((item) => item !== src))
+                          }
+                        >
+                          下线
+                        </Button>
+                      </Space>
+                    </article>
+                  ))}
+                </div>
+              )}
+            </div>
+          </Card>
+
+          <Card
+            className="studio-card"
+            title={
+              <Space>
+                <ThunderboltOutlined />
+                A/B 实验报告
+              </Space>
+            }
+          >
+            <Space direction="vertical" style={{ width: '100%' }}>
+              <Input value={generation.prompt} readOnly />
+              <Input
+                value={abPromptB}
+                onChange={(event) => setAbPromptB(event.target.value)}
+                placeholder="输入 B 组提示词（A 为当前提示词）"
+              />
+              <Button onClick={generateAbReport}>生成对比报告</Button>
+              {abReport ? (
+                <div className="ab-report">
+                  <Text strong>A 组</Text>
+                  <Text type="secondary">
+                    样本 {abReport.countA} · 成功率 {abReport.successRateA}% · 平均延迟 {abReport.avgLatencyA}ms · 平均评分 {abReport.avgRatingA}
+                  </Text>
+                  <Text strong>B 组</Text>
+                  <Text type="secondary">
+                    样本 {abReport.countB} · 成功率 {abReport.successRateB}% · 平均延迟 {abReport.avgLatencyB}ms · 平均评分 {abReport.avgRatingB}
+                  </Text>
+                </div>
+              ) : (
+                <Text type="secondary">暂无报告</Text>
+              )}
+            </Space>
+          </Card>
+
+          <Card
+            className="studio-card"
+            title={
+              <Space>
+                <HistoryOutlined />
+                安全审计日志
+              </Space>
+            }
+            extra={
+              <Button size="small" onClick={() => setAuditLogs([])}>
+                清空日志
+              </Button>
+            }
+          >
+            {auditLogs.length === 0 ? (
+              <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="暂无审计日志" />
+            ) : (
+              <div className="audit-log-list">
+                {auditLogs.slice(0, 80).map((log) => (
+                  <div key={log.id} className="audit-log-item">
+                    <Space size={6}>
+                      <Text type="secondary">{new Date(log.at).toLocaleTimeString()}</Text>
+                      <Tag>{log.action}</Tag>
+                    </Space>
+                    <Paragraph ellipsis={{ rows: 2 }}>{log.detail}</Paragraph>
+                  </div>
+                ))}
+              </div>
+            )}
+          </Card>
+
+          <Card
             className="studio-card gallery-card"
             title={
               <Space>
@@ -4714,6 +6066,10 @@ function App() {
                     setImageReviews({})
                     setQueueTasks([])
                     setSseEvents([])
+                    setComparePick([])
+                    setCompareModalOpen(false)
+                    setImageMetadataMap({})
+                    setApprovalState({})
                     setResponseText('')
                     setRawResponse('')
                     setRequestPreview('')
@@ -4769,7 +6125,7 @@ function App() {
                           icon={<DownloadOutlined />}
                           onClick={(event) => {
                             event.stopPropagation()
-                            void downloadImage(image).catch(() => {
+                            void downloadWithAutoName(image).catch(() => {
                               messageApi.error('下载失败，请检查图片链接是否可访问')
                             })
                           }}
@@ -4784,6 +6140,17 @@ function App() {
                             handleUseAsReferenceImage(image)
                           }}
                         />
+                      </Tooltip>
+                      <Tooltip title="加入对比">
+                        <Button
+                          type={comparePick.includes(image.src) ? 'default' : 'text'}
+                          onClick={(event) => {
+                            event.stopPropagation()
+                            toggleComparePick(image)
+                          }}
+                        >
+                          对比
+                        </Button>
                       </Tooltip>
                     </div>
                     <div className="image-review-bar">
@@ -4825,7 +6192,56 @@ function App() {
                         >
                           淘汰
                         </Button>
+                        {runtimeConfig.approvalFlowEnabled ? (
+                          <>
+                            <Button
+                              size="small"
+                              type={approvalState[image.src] === 'approved' ? 'primary' : 'default'}
+                              onClick={(event) => {
+                                event.stopPropagation()
+                                setApprovalState((previous) => ({
+                                  ...previous,
+                                  [image.src]: 'approved',
+                                }))
+                              }}
+                            >
+                              通过
+                            </Button>
+                            <Button
+                              size="small"
+                              danger={approvalState[image.src] === 'rejected'}
+                              onClick={(event) => {
+                                event.stopPropagation()
+                                setApprovalState((previous) => ({
+                                  ...previous,
+                                  [image.src]: previous[image.src] === 'rejected' ? 'pending' : 'rejected',
+                                }))
+                              }}
+                            >
+                              驳回
+                            </Button>
+                          </>
+                        ) : null}
+                        <Button
+                          size="small"
+                          onClick={(event) => {
+                            event.stopPropagation()
+                            publishImage(image)
+                          }}
+                        >
+                          发布
+                        </Button>
                       </Space>
+                    </div>
+                    <div className="image-meta-inline">
+                      {runtimeConfig.similarityDedupeEnabled && duplicateImageSet[image.src] ? (
+                        <Tag color="orange">重复候选</Tag>
+                      ) : null}
+                      {runtimeConfig.approvalFlowEnabled ? (
+                        <Tag color={approvalState[image.src] === 'approved' ? 'green' : approvalState[image.src] === 'rejected' ? 'red' : 'default'}>
+                          审批：{approvalState[image.src] ?? 'pending'}
+                        </Tag>
+                      ) : null}
                     </div>
                   </article>
                 ))}
@@ -4855,12 +6271,17 @@ function App() {
                     type="primary"
                     icon={<DownloadOutlined />}
                     onClick={() => {
-                      void downloadImage(previewImage).catch(() => {
+                      void downloadWithAutoName(previewImage).catch(() => {
                         messageApi.error('下载失败，请检查图片链接是否可访问')
                       })
                     }}
                   >
                     下载图片
+                  </Button>
+                  <Button
+                    onClick={() => publishImage(previewImage)}
+                  >
+                    发布到看板
                   </Button>
                 </Space>
               ) : null
@@ -4883,9 +6304,54 @@ function App() {
                     }
                     placeholder="记录这张图的优缺点，便于后续迭代。"
                   />
+                  {imageMetadataMap[previewImage.src] ? (
+                    <div className="image-metadata-panel">
+                      <Text type="secondary">模型：{imageMetadataMap[previewImage.src].model}</Text>
+                      <Text type="secondary">Seed：{imageMetadataMap[previewImage.src].seedLabel}</Text>
+                      <Text type="secondary">
+                        分辨率：{imageMetadataMap[previewImage.src].resolution} · 延迟 {imageMetadataMap[previewImage.src].latencyMs ?? '-'}ms
+                      </Text>
+                      <Text type="secondary">时间：{new Date(imageMetadataMap[previewImage.src].createdAt).toLocaleString()}</Text>
+                      <Paragraph ellipsis={{ rows: 2 }}>
+                        {imageMetadataMap[previewImage.src].prompt}
+                      </Paragraph>
+                    </div>
+                  ) : null}
                 </div>
               </div>
             ) : null}
+          </Modal>
+
+          <Modal
+            open={compareModalOpen}
+            title="可视化对比滑块"
+            width="min(96vw, 1180px)"
+            centered
+            onCancel={() => setCompareModalOpen(false)}
+            footer={null}
+          >
+            {comparePick.length >= 2 ? (
+              <div className="compare-stage">
+                <div className="compare-canvas">
+                  <img src={comparePick[0]} alt="compare-left" className="compare-image base" />
+                  <div
+                    className="compare-overlay"
+                    style={{ width: `${compareRatio}%` }}
+                  >
+                    <img src={comparePick[1]} alt="compare-right" className="compare-image" />
+                  </div>
+                  <div className="compare-divider" style={{ left: `${compareRatio}%` }} />
+                </div>
+                <Slider
+                  min={0}
+                  max={100}
+                  value={compareRatio}
+                  onChange={(value) => setCompareRatio(Number(value))}
+                />
+              </div>
+            ) : (
+              <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="请先在画廊选择两张图" />
+            )}
           </Modal>
 
           <Card
@@ -4981,7 +6447,13 @@ function App() {
                   删除选中
                 </Button>
                 <Button onClick={clearHistorySelection}>清空选择</Button>
-                <Button onClick={() => setHistory([])} danger>
+                <Button
+                  onClick={() => {
+                    setHistory([])
+                    addAuditLog('history.clear', '清空全部历史记录')
+                  }}
+                  danger
+                >
                   清空历史
                 </Button>
               </Space>
