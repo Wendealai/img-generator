@@ -7,11 +7,8 @@ import {
   PictureOutlined,
   ReloadOutlined,
   RightOutlined,
-  SearchOutlined,
   SendOutlined,
   SettingOutlined,
-  StarFilled,
-  StarOutlined,
   ThunderboltOutlined,
   UploadOutlined,
 } from '@ant-design/icons'
@@ -48,7 +45,6 @@ type BackendMode = 'direct' | 'n8n'
 type StudioMode = 'text-to-image' | 'image-to-image'
 type RunPhase = 'idle' | 'testing' | 'running' | 'success' | 'error'
 type BatchMode = 'single' | 'prompt-list' | 'reroll'
-type PromptTemplateScope = 'all' | 'favorites' | 'recent'
 type QueueTaskStatus = 'pending' | 'running' | 'success' | 'error' | 'cancelled'
 type QueueTaskPriority = 'high' | 'normal' | 'low'
 type RetryProfile = 'conservative' | 'balanced' | 'aggressive'
@@ -1552,24 +1548,6 @@ function replaceTemplateVariables(text: string, variables: Record<string, string
     output = output.replace(pattern, value)
   }
   return output
-}
-
-function summarizePromptDiff(newer: string, older: string): string {
-  const newerTokens = newer
-    .split(/[\s,，。!！?？;；:：]+/)
-    .map((item) => item.trim())
-    .filter(Boolean)
-  const olderTokens = older
-    .split(/[\s,，。!！?？;；:：]+/)
-    .map((item) => item.trim())
-    .filter(Boolean)
-  const newerSet = new Set(newerTokens)
-  const olderSet = new Set(olderTokens)
-  const added = newerTokens.filter((token) => !olderSet.has(token))
-  const removed = olderTokens.filter((token) => !newerSet.has(token))
-  return `新增关键词 ${added.slice(0, 8).join(' / ') || '-'}；删除关键词 ${
-    removed.slice(0, 8).join(' / ') || '-'
-  }`
 }
 
 function recommendConfigByPrompt(prompt: string): Partial<GenerationConfig> {
@@ -3239,13 +3217,13 @@ function App() {
   const [errorDiagnostics, setErrorDiagnostics] = useState<ErrorDiagnostic[]>([])
   const [diagnosticCategoryFilter, setDiagnosticCategoryFilter] = useState<'all' | ErrorCategory>('all')
   const [templateVariablesText, setTemplateVariablesText] = useState('主体=未来城市\n风格=电影感')
-  const [templateVersions, setTemplateVersions] = useState<Record<string, string[]>>(() =>
+  const [templateVersions] = useState<Record<string, string[]>>(() =>
     readTemplateVersionStore(),
   )
-  const [templateBestImageMap, setTemplateBestImageMap] = useState<Record<string, string>>(() =>
+  const [templateBestImageMap] = useState<Record<string, string>>(() =>
     readStoredTemplateBestMap(),
   )
-  const [templateVersionSelection, setTemplateVersionSelection] = useState<Record<string, number>>({})
+  const [templateVersionSelection] = useState<Record<string, number>>({})
   const [templateDiffModal, setTemplateDiffModal] = useState<{
     open: boolean
     title: string
@@ -3281,9 +3259,6 @@ function App() {
   const [leftPanePercent, setLeftPanePercent] = useState(44)
   const [showOnlyKeptImages, setShowOnlyKeptImages] = useState(false)
   const [uploadAnalysis, setUploadAnalysis] = useState<UploadAnalysis | null>(null)
-  const [templateScope, setTemplateScope] = useState<PromptTemplateScope>('all')
-  const [templateCategory, setTemplateCategory] = useState<string>('all')
-  const [templateQuery, setTemplateQuery] = useState('')
   const [source, setSource] = useState<ImageSourceState>({
     file: null,
     previewUrl: '',
@@ -3759,63 +3734,6 @@ function App() {
     return list
   }, [promptTemplateById])
 
-  const promptTemplateCategories = useMemo(() => {
-    const categorySet = new Set(PROMPT_TEMPLATE_LIBRARY.map((item) => item.category))
-    return ['all', ...Array.from(categorySet)]
-  }, [])
-
-  const favoriteTemplateSet = useMemo(
-    () => new Set(promptTemplateStore.favorites),
-    [promptTemplateStore.favorites],
-  )
-
-  const recentTemplateSet = useMemo(
-    () => new Set(promptTemplateStore.recent),
-    [promptTemplateStore.recent],
-  )
-
-  const filteredPromptTemplates = useMemo(() => {
-    const keyword = templateQuery.trim().toLowerCase()
-    return PROMPT_TEMPLATE_LIBRARY.filter((template) => {
-      if (templateScope === 'favorites' && !favoriteTemplateSet.has(template.id)) {
-        return false
-      }
-      if (templateScope === 'recent' && !recentTemplateSet.has(template.id)) {
-        return false
-      }
-      if (templateCategory !== 'all' && template.category !== templateCategory) {
-        return false
-      }
-      if (!keyword) {
-        return true
-      }
-      const searchText = [
-        template.label,
-        template.category,
-        template.prompt,
-        template.negativePrompt ?? '',
-        template.tags.join(' '),
-      ]
-        .join(' ')
-        .toLowerCase()
-      return searchText.includes(keyword)
-    })
-  }, [favoriteTemplateSet, recentTemplateSet, templateCategory, templateQuery, templateScope])
-
-  const recentPromptTemplates = useMemo(() => {
-    const list: PromptTemplate[] = []
-    for (const templateId of promptTemplateStore.recent) {
-      const matched = promptTemplateById.get(templateId)
-      if (matched) {
-        list.push(matched)
-      }
-      if (list.length >= 6) {
-        break
-      }
-    }
-    return list
-  }, [promptTemplateById, promptTemplateStore.recent])
-
   const addAuditLog = (action: string, detail: string) => {
     setAuditLogs((previous) => [
       {
@@ -3837,72 +3755,6 @@ function App() {
       : selected
   }
 
-  const saveTemplateVersionFromCurrentPrompt = (templateId: string) => {
-    const currentPrompt = generation.prompt.trim()
-    if (!currentPrompt) {
-      messageApi.warning('当前提示词为空，无法存为模板版本')
-      return
-    }
-    setTemplateVersions((previous) => {
-      const currentVersions = previous[templateId] ?? [promptTemplateById.get(templateId)?.prompt ?? '']
-      const next = [currentPrompt, ...currentVersions.filter((item) => item !== currentPrompt)].slice(0, 12)
-      return {
-        ...previous,
-        [templateId]: next,
-      }
-    })
-    setTemplateVersionSelection((previous) => ({
-      ...previous,
-      [templateId]: 0,
-    }))
-    addAuditLog('template.version.save', `模板 ${templateId} 保存了新版本`)
-    messageApi.success('已保存为新模板版本')
-  }
-
-  const rollbackTemplateVersion = (templateId: string) => {
-    setTemplateVersionSelection((previous) => {
-      const current = previous[templateId] ?? 0
-      const next = Math.max(0, current + 1)
-      return {
-        ...previous,
-        [templateId]: next,
-      }
-    })
-    addAuditLog('template.version.rollback', `模板 ${templateId} 回滚到旧版本`)
-  }
-
-  const openTemplateVersionDiff = (template: PromptTemplate) => {
-    const versionList = templateVersions[template.id] ?? [template.prompt]
-    const currentIndex = Math.max(0, templateVersionSelection[template.id] ?? 0)
-    const newer = versionList[currentIndex] ?? versionList[0] ?? template.prompt
-    const older = versionList[currentIndex + 1] ?? template.prompt
-    const summary = summarizePromptDiff(newer, older)
-    setTemplateDiffModal({
-      open: true,
-      title: `${template.label} 版本差异`,
-      summary,
-      newer,
-      older,
-    })
-  }
-
-  const bindTemplateBestImage = (template: PromptTemplate) => {
-    const resolvedPrompt = resolveTemplatePrompt(template).trim()
-    const matchedImage =
-      images.find((image) => imageMetadataMap[image.src]?.prompt.trim() === resolvedPrompt) ??
-      images[0]
-    if (!matchedImage) {
-      messageApi.warning('暂无可绑定的图片，请先生成后再绑定最佳图')
-      return
-    }
-    setTemplateBestImageMap((previous) => ({
-      ...previous,
-      [template.id]: matchedImage.src,
-    }))
-    addAuditLog('template.best.bind', `模板 ${template.id} 绑定最佳图`)
-    messageApi.success('已绑定最佳图')
-  }
-
   const applyPromptTemplate = (template: PromptTemplate) => {
     const resolvedPrompt = resolveTemplatePrompt(template)
     setGeneration((previous) => ({
@@ -3920,18 +3772,6 @@ function App() {
     }))
     addAuditLog('template.apply', `套用模板 ${template.label}`)
     messageApi.success(`已套用模板：${template.label}`)
-  }
-
-  const toggleFavoriteTemplate = (templateId: string) => {
-    setPromptTemplateStore((previous) => {
-      const isFavorited = previous.favorites.includes(templateId)
-      return {
-        ...previous,
-        favorites: isFavorited
-          ? previous.favorites.filter((item) => item !== templateId)
-          : [templateId, ...previous.favorites].slice(0, 40),
-      }
-    })
   }
 
   const saveCurrentPreset = () => {
@@ -6015,184 +5855,6 @@ function App() {
                 {template.label}
               </Button>
             ))}
-            <Button
-              size="small"
-              icon={<StarOutlined />}
-              onClick={() => setTemplateScope('favorites')}
-            >
-              只看收藏
-            </Button>
-          </div>
-
-          <div className="template-center">
-            <div className="template-center-head">
-              <Text className="field-label">提示词模板中心</Text>
-              <Space wrap size={6}>
-                <Tag color="gold">收藏 {promptTemplateStore.favorites.length}</Tag>
-                <Tag icon={<ClockCircleOutlined />}>最近 {promptTemplateStore.recent.length}</Tag>
-                <Tag>模板库 {PROMPT_TEMPLATE_LIBRARY.length}</Tag>
-              </Space>
-            </div>
-
-            <div className="template-center-toolbar">
-              <Input
-                allowClear
-                prefix={<SearchOutlined />}
-                value={templateQuery}
-                onChange={(event) => setTemplateQuery(event.target.value)}
-                placeholder="搜索模板名称、标签、场景、关键词..."
-              />
-              <Segmented
-                value={templateScope}
-                options={[
-                  { label: '全部', value: 'all' },
-                  { label: '收藏', value: 'favorites' },
-                  { label: '最近', value: 'recent' },
-                ]}
-                onChange={(value) =>
-                  setTemplateScope(
-                    value === 'favorites' || value === 'recent'
-                      ? value
-                      : 'all',
-                  )
-                }
-              />
-              <Select
-                value={templateCategory}
-                style={{ minWidth: 150 }}
-                options={promptTemplateCategories.map((category) => ({
-                  label: category === 'all' ? '全部分类' : category,
-                  value: category,
-                }))}
-                onChange={(value) => setTemplateCategory(String(value))}
-              />
-            </div>
-
-            {filteredPromptTemplates.length === 0 ? (
-              <Empty
-                image={Empty.PRESENTED_IMAGE_SIMPLE}
-                description="没有匹配到模板，请调整筛选条件"
-              />
-            ) : (
-              <div className="template-grid">
-                {filteredPromptTemplates.map((template) => {
-                  const isFavorite = favoriteTemplateSet.has(template.id)
-                  const versionList = templateVersions[template.id] ?? [template.prompt]
-                  const selectedVersionIndex = Math.min(
-                    templateVersionSelection[template.id] ?? 0,
-                    Math.max(0, versionList.length - 1),
-                  )
-                  const resolvedPreview = runtimeConfig.templateVariablesEnabled
-                    ? replaceTemplateVariables(versionList[selectedVersionIndex] ?? template.prompt, templateVariables)
-                    : versionList[selectedVersionIndex] ?? template.prompt
-                  const bestImageSrc = templateBestImageMap[template.id]
-                  return (
-                    <article key={template.id} className="template-item">
-                      <div className="template-item-main">
-                        <div className="template-item-head">
-                          <Text strong>{template.label}</Text>
-                          <Space size={6}>
-                            <Tag color="geekblue">{template.category}</Tag>
-                            {isFavorite ? <Tag color="gold">已收藏</Tag> : null}
-                          </Space>
-                        </div>
-                        <Paragraph className="template-item-prompt" ellipsis={{ rows: 2 }}>
-                          {resolvedPreview}
-                        </Paragraph>
-                        {bestImageSrc ? (
-                          <div className="template-best-shot">
-                            <img src={bestImageSrc} alt={`${template.label} best`} />
-                            <Text type="secondary">已绑定最佳图</Text>
-                          </div>
-                        ) : (
-                          <Text type="secondary">未绑定最佳图</Text>
-                        )}
-                        <Space size={6} wrap>
-                          <Tag color="purple">版本 {selectedVersionIndex + 1}/{versionList.length}</Tag>
-                          <Select
-                            size="small"
-                            value={selectedVersionIndex}
-                            style={{ width: 132 }}
-                            options={versionList.map((_, index) => ({
-                              label: `v${index + 1}${index === 0 ? ' (最新)' : ''}`,
-                              value: index,
-                            }))}
-                            onChange={(value) =>
-                              setTemplateVersionSelection((previous) => ({
-                                ...previous,
-                                [template.id]: Number(value),
-                              }))
-                            }
-                          />
-                        </Space>
-                        <Space wrap size={[6, 6]}>
-                          {template.tags.map((tag) => (
-                            <Tag key={`${template.id}-${tag}`}>{tag}</Tag>
-                          ))}
-                        </Space>
-                      </div>
-                      <div className="template-item-actions">
-                        <Button
-                          type="primary"
-                          size="small"
-                          onClick={() => applyPromptTemplate(template)}
-                        >
-                          套用
-                        </Button>
-                        <Button
-                          size="small"
-                          icon={isFavorite ? <StarFilled /> : <StarOutlined />}
-                          onClick={() => toggleFavoriteTemplate(template.id)}
-                        >
-                          {isFavorite ? '取消收藏' : '收藏'}
-                        </Button>
-                        <Button
-                          size="small"
-                          onClick={() => saveTemplateVersionFromCurrentPrompt(template.id)}
-                        >
-                          存新版本
-                        </Button>
-                        <Button
-                          size="small"
-                          onClick={() => rollbackTemplateVersion(template.id)}
-                        >
-                          回滚
-                        </Button>
-                        <Button
-                          size="small"
-                          onClick={() => openTemplateVersionDiff(template)}
-                        >
-                          版本差异
-                        </Button>
-                        <Button
-                          size="small"
-                          onClick={() => bindTemplateBestImage(template)}
-                        >
-                          绑定最佳图
-                        </Button>
-                      </div>
-                    </article>
-                  )
-                })}
-              </div>
-            )}
-
-            {recentPromptTemplates.length > 0 ? (
-              <div className="template-recent-strip">
-                <Text type="secondary">最近使用：</Text>
-                <Space wrap size={8}>
-                  {recentPromptTemplates.map((template) => (
-                    <Button
-                      key={`recent-${template.id}`}
-                      size="small"
-                      onClick={() => applyPromptTemplate(template)}
-                    >
-                      {template.label}
-                    </Button>
-                  ))}
-                </Space>
-              </div>
-            ) : null}
           </div>
 
           <Text className="field-label">提示词</Text>
