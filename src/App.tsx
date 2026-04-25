@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState, type ChangeEvent } from 'react'
+import { useEffect, useMemo, useRef, useState, type ChangeEvent, type ReactNode } from 'react'
 import {
   ApiOutlined,
   ClockCircleOutlined,
@@ -6,6 +6,7 @@ import {
   HistoryOutlined,
   PictureOutlined,
   ReloadOutlined,
+  RightOutlined,
   SearchOutlined,
   SendOutlined,
   SettingOutlined,
@@ -53,6 +54,23 @@ type QueueTaskPriority = 'high' | 'normal' | 'low'
 type RetryProfile = 'conservative' | 'balanced' | 'aggressive'
 type ErrorCategory = 'network' | 'auth' | 'quota' | 'server' | 'sse' | 'model' | 'client' | 'unknown'
 type ImageDecision = 'keep' | 'discard' | 'unrated'
+type StudioSectionId =
+  | 'promptWorkbench'
+  | 'gallery'
+  | 'overview'
+  | 'connection'
+  | 'generationSettings'
+  | 'status'
+  | 'queue'
+  | 'costHealth'
+  | 'endpointMatrix'
+  | 'diagnostics'
+  | 'publish'
+  | 'abReport'
+  | 'auditLogs'
+  | 'debug'
+  | 'history'
+  | 'promptGuide'
 
 interface ConnectionConfig {
   backendMode: BackendMode
@@ -729,6 +747,25 @@ const DEFAULT_MASK_EDITOR: MaskEditorState = {
   enabled: false,
   protectMode: 'keep-center',
   maskNote: '',
+}
+
+const DEFAULT_SECTION_OPEN_STATE: Record<StudioSectionId, boolean> = {
+  promptWorkbench: false,
+  gallery: false,
+  overview: false,
+  connection: false,
+  generationSettings: false,
+  status: false,
+  queue: false,
+  costHealth: false,
+  endpointMatrix: false,
+  diagnostics: false,
+  publish: false,
+  abReport: false,
+  auditLogs: false,
+  debug: false,
+  history: false,
+  promptGuide: false,
 }
 
 const INITIAL_RUN_STATE: RunState = {
@@ -3237,6 +3274,9 @@ function App() {
   const [syncingCloud, setSyncingCloud] = useState(false)
   const [maskEditor, setMaskEditor] = useState<MaskEditorState>(DEFAULT_MASK_EDITOR)
   const [importPromptText, setImportPromptText] = useState('')
+  const [openSections, setOpenSections] = useState<Record<StudioSectionId, boolean>>(
+    DEFAULT_SECTION_OPEN_STATE,
+  )
   const [layoutCompact, setLayoutCompact] = useState(false)
   const [leftPanePercent, setLeftPanePercent] = useState(44)
   const [showOnlyKeptImages, setShowOnlyKeptImages] = useState(false)
@@ -6399,6 +6439,298 @@ function App() {
     },
   ]
 
+  const toggleSection = (sectionId: StudioSectionId) => {
+    setOpenSections((previous) => ({
+      ...previous,
+      [sectionId]: !previous[sectionId],
+    }))
+  }
+
+  const getSectionCardClassName = (sectionId: StudioSectionId, ...classNames: string[]) =>
+    [...classNames, 'studio-card-collapsible', openSections[sectionId] ? 'is-open' : 'is-collapsed']
+      .filter(Boolean)
+      .join(' ')
+
+  const renderSectionTitle = (
+    sectionId: StudioSectionId,
+    icon: ReactNode,
+    title: string,
+    meta?: string,
+  ) => (
+    <button
+      type="button"
+      className="section-toggle"
+      onClick={() => toggleSection(sectionId)}
+      aria-expanded={openSections[sectionId]}
+    >
+      <span className="section-toggle-main">
+        <span
+          className={
+            openSections[sectionId] ? 'section-toggle-caret is-open' : 'section-toggle-caret'
+          }
+          aria-hidden
+        >
+          <RightOutlined />
+        </span>
+        <span className="section-toggle-icon">{icon}</span>
+        <span className="section-toggle-copy">
+          <span className="section-toggle-title">{title}</span>
+          {meta ? <span className="section-toggle-meta">{meta}</span> : null}
+        </span>
+      </span>
+    </button>
+  )
+
+  const promptWorkbenchContent = (
+    <>
+      <Tabs
+        activeKey={mode}
+        items={modeTabs}
+        onChange={(nextKey) =>
+          setMode(nextKey === 'image-to-image' ? 'image-to-image' : 'text-to-image')
+        }
+      />
+
+      <div className="actions-row">
+        <Button
+          icon={isTesting ? <ClockCircleOutlined /> : <ApiOutlined />}
+          onClick={handleTestConnection}
+          loading={isTesting}
+        >
+          测试连接
+        </Button>
+        <Button
+          type="primary"
+          icon={<SendOutlined />}
+          onClick={handleGenerate}
+          loading={isGenerating}
+          disabled={isGenerateDisabled}
+        >
+          {generateButtonLabel}
+        </Button>
+        <Button danger onClick={handleCancel} disabled={!isGenerating}>
+          取消任务
+        </Button>
+      </div>
+    </>
+  )
+
+  const galleryContent = (
+    <>
+      <div className="gallery-toolbar">
+        <Space wrap>
+          <Button onClick={() => setShowOnlyKeptImages((previous) => !previous)}>
+            {showOnlyKeptImages ? '显示全部' : '仅看保留'}
+          </Button>
+          <Button size="small" onClick={openCompareModal} disabled={comparePick.length < 2}>
+            对比滑块（{comparePick.length}/2）
+          </Button>
+          <Button onClick={() => void exportProjectZip()}>导出项目 ZIP</Button>
+          <Button
+            icon={<ReloadOutlined />}
+            onClick={() => {
+              setImages([])
+              setPreviewImage(null)
+              setImageReviews({})
+              setQueueTasks([])
+              setSseEvents([])
+              setComparePick([])
+              setCompareModalOpen(false)
+              setImageMetadataMap({})
+              setApprovalState({})
+              setResponseText('')
+              setRawResponse('')
+              setRequestPreview('')
+              setRunState(INITIAL_RUN_STATE)
+            }}
+          >
+            清空
+          </Button>
+        </Space>
+        <Space wrap size={6}>
+          <Tag color="blue">总图 {images.length}</Tag>
+          {visibleImages.length !== images.length ? (
+            <Tag color="cyan">筛后 {visibleImages.length}</Tag>
+          ) : null}
+        </Space>
+      </div>
+
+      {isGenerating ? (
+        <div className="gallery-loading">
+          <Text>正在生成中，请稍候...</Text>
+        </div>
+      ) : null}
+
+      {!isGenerating && images.length === 0 ? (
+        <Empty
+          description="暂无图片结果。请在上方打开提示词工作台并点击「开始生成」。"
+          image={Empty.PRESENTED_IMAGE_SIMPLE}
+        />
+      ) : null}
+      {!isGenerating && images.length > 0 && visibleImages.length === 0 ? (
+        <Empty
+          description="当前过滤条件下没有图片（可切换为显示全部）。"
+          image={Empty.PRESENTED_IMAGE_SIMPLE}
+        />
+      ) : null}
+
+      {visibleImages.length > 0 ? (
+        <div className="image-grid">
+          {visibleImages.map((image) => (
+            <article
+              key={image.id}
+              className="image-card"
+              role="button"
+              tabIndex={0}
+              aria-label="查看大图"
+              onClick={() => setPreviewImage(image)}
+              onKeyDown={(event) => {
+                if (event.key === 'Enter' || event.key === ' ') {
+                  event.preventDefault()
+                  setPreviewImage(image)
+                }
+              }}
+            >
+              <img src={image.src} alt="模型生成结果图" />
+              <div className="image-actions">
+                <Tooltip title="下载图片">
+                  <Button
+                    type="text"
+                    icon={<DownloadOutlined />}
+                    onClick={(event) => {
+                      event.stopPropagation()
+                      void downloadWithAutoName(image).catch(() => {
+                        messageApi.error('下载失败，请检查图片链接是否可访问')
+                      })
+                    }}
+                  />
+                </Tooltip>
+                <Tooltip title="设为图生图参考图">
+                  <Button
+                    type="text"
+                    icon={<UploadOutlined />}
+                    onClick={(event) => {
+                      event.stopPropagation()
+                      handleUseAsReferenceImage(image)
+                    }}
+                  />
+                </Tooltip>
+                <Tooltip title="加入对比">
+                  <Button
+                    type={comparePick.includes(image.src) ? 'default' : 'text'}
+                    onClick={(event) => {
+                      event.stopPropagation()
+                      toggleComparePick(image)
+                    }}
+                  >
+                    对比
+                  </Button>
+                </Tooltip>
+              </div>
+              <div className="image-review-bar">
+                <div onClick={(event) => event.stopPropagation()}>
+                  <Rate
+                    allowClear
+                    value={imageReviews[image.src]?.rating ?? 0}
+                    onChange={(value) => updateImageReview(image, { rating: value })}
+                  />
+                </div>
+                <Space size={6}>
+                  <Button
+                    size="small"
+                    type={imageReviews[image.src]?.decision === 'keep' ? 'primary' : 'default'}
+                    onClick={(event) => {
+                      event.stopPropagation()
+                      updateImageReview(image, {
+                        decision:
+                          imageReviews[image.src]?.decision === 'keep' ? 'unrated' : 'keep',
+                      })
+                    }}
+                  >
+                    保留
+                  </Button>
+                  <Button
+                    size="small"
+                    danger={imageReviews[image.src]?.decision === 'discard'}
+                    onClick={(event) => {
+                      event.stopPropagation()
+                      updateImageReview(image, {
+                        decision:
+                          imageReviews[image.src]?.decision === 'discard'
+                            ? 'unrated'
+                            : 'discard',
+                      })
+                    }}
+                  >
+                    淘汰
+                  </Button>
+                  {runtimeConfig.approvalFlowEnabled ? (
+                    <>
+                      <Button
+                        size="small"
+                        type={approvalState[image.src] === 'approved' ? 'primary' : 'default'}
+                        onClick={(event) => {
+                          event.stopPropagation()
+                          setApprovalState((previous) => ({
+                            ...previous,
+                            [image.src]: 'approved',
+                          }))
+                        }}
+                      >
+                        通过
+                      </Button>
+                      <Button
+                        size="small"
+                        danger={approvalState[image.src] === 'rejected'}
+                        onClick={(event) => {
+                          event.stopPropagation()
+                          setApprovalState((previous) => ({
+                            ...previous,
+                            [image.src]:
+                              previous[image.src] === 'rejected' ? 'pending' : 'rejected',
+                          }))
+                        }}
+                      >
+                        驳回
+                      </Button>
+                    </>
+                  ) : null}
+                  <Button
+                    size="small"
+                    onClick={(event) => {
+                      event.stopPropagation()
+                      publishImage(image)
+                    }}
+                  >
+                    发布
+                  </Button>
+                </Space>
+              </div>
+              <div className="image-meta-inline">
+                {runtimeConfig.similarityDedupeEnabled && duplicateImageSet[image.src] ? (
+                  <Tag color="orange">重复候选</Tag>
+                ) : null}
+                {runtimeConfig.approvalFlowEnabled ? (
+                  <Tag
+                    color={
+                      approvalState[image.src] === 'approved'
+                        ? 'green'
+                        : approvalState[image.src] === 'rejected'
+                          ? 'red'
+                          : 'default'
+                    }
+                  >
+                    审批：{approvalState[image.src] ?? 'pending'}
+                  </Tag>
+                ) : null}
+              </div>
+            </article>
+          ))}
+        </div>
+      ) : null}
+    </>
+  )
+
   return (
     <div className="studio-shell">
       {contextHolder}
@@ -6408,61 +6740,143 @@ function App() {
         <span />
       </div>
 
-      <header className="hero-card">
-        <div className="hero-main">
-          <Tag color="gold">Dual Engine Studio</Tag>
-          <Title level={1}>Aurora Image Forge</Title>
-          <Paragraph>
-            面向生产场景的生图前端，OpenAI 侧采用 <Text code>gpt-5.5</Text> 驱动
-            <Text code>image_generation(model: gpt-image-2)</Text>，并集成 Gemini
-            <Text code>nanobanana2</Text>，支持文生图、图生图、参数调优、历史追溯与请求调试。
-          </Paragraph>
-          <Space wrap>
-            <Tag icon={<ThunderboltOutlined />}>艺术化 UI</Tag>
-            <Tag icon={<ApiOutlined />}>可编辑 URL / API</Tag>
-            <Tag icon={<PictureOutlined />}>文生图 + 图生图</Tag>
+      <div
+        className={layoutCompact ? 'priority-grid priority-grid-compact' : 'priority-grid'}
+        style={
+          layoutCompact
+            ? undefined
+            : {
+                gridTemplateColumns: `minmax(340px, ${leftPanePercent / 100}fr) minmax(380px, ${(100 - leftPanePercent) / 100}fr)`,
+              }
+        }
+      >
+        <Card
+          className={getSectionCardClassName(
+            'promptWorkbench',
+            'studio-card',
+            'compact-card',
+            'prompt-card',
+            'priority-card',
+            'prompt-workbench-card',
+          )}
+          title={renderSectionTitle(
+            'promptWorkbench',
+            <SendOutlined />,
+            '提示词工作台',
+            mode === 'image-to-image' ? '图生图 / 重绘与抽卡' : '文生图 / 模板与增强',
+          )}
+          extra={
+            <Space size={6}>
+              <Tag color={mode === 'image-to-image' ? 'cyan' : 'geekblue'}>
+                {mode === 'image-to-image' ? '图生图' : '文生图'}
+              </Tag>
+              <Tag>{batchConfig.mode === 'prompt-list' ? '批量' : batchConfig.mode === 'reroll' ? '抽卡' : '单次'}</Tag>
+            </Space>
+          }
+        >
+          {openSections.promptWorkbench ? promptWorkbenchContent : null}
+        </Card>
+
+        <Card
+          className={getSectionCardClassName(
+            'gallery',
+            'studio-card',
+            'gallery-card',
+            'priority-card',
+            'gallery-priority-card',
+          )}
+          title={renderSectionTitle(
+            'gallery',
+            <PictureOutlined />,
+            '图片输出',
+            images.length > 0 ? `${visibleImages.length}/${images.length} 张可见` : '等待生成结果',
+          )}
+          extra={
+            <Space size={6}>
+              <Tag color="blue">总图 {images.length}</Tag>
+              {publishedImages.length > 0 ? <Tag color="green">已发布 {publishedImages.length}</Tag> : null}
+            </Space>
+          }
+        >
+          {openSections.gallery ? galleryContent : null}
+        </Card>
+      </div>
+
+      <section className={openSections.overview ? 'hero-card is-open' : 'hero-card is-collapsed'}>
+        <div className="hero-card-head">
+          {renderSectionTitle(
+            'overview',
+            <ThunderboltOutlined />,
+            '总览概览',
+            '项目定位、引擎状态与本轮迭代方向',
+          )}
+          <Space wrap size={[8, 8]} className="hero-quick-tags">
+            <Tag color="gold">Dual Engine Studio</Tag>
+            <Tag color="blue">{connection.backendMode === 'n8n' ? 'n8n 编排' : '直连 API'}</Tag>
+            <Tag color={connection.provider === 'openai' ? 'geekblue' : 'green'}>
+              {connection.provider === 'openai' ? 'ChatGPT' : 'Gemini'}
+            </Tag>
           </Space>
-          <div className="iteration-roadmap">
-            {UI_UPGRADE_PLAN.map((item, index) => (
-              <article key={item.title} className="roadmap-item">
-                <span>迭代 0{index + 1}</span>
-                <h4>{item.title}</h4>
-                <p>{item.detail}</p>
-              </article>
-            ))}
-          </div>
         </div>
 
-        <div className="hero-metrics">
-          <div className="metric-item">
-            <span>当前引擎</span>
-            <strong>
-              {connection.backendMode === 'n8n'
-                ? `n8n 编排 · ${connection.provider === 'openai' ? 'ChatGPT' : 'Gemini'}`
-                : connection.provider === 'openai'
-                  ? 'ChatGPT'
-                  : 'Gemini'}
-            </strong>
+        {openSections.overview ? (
+          <div className="hero-card-body">
+            <div className="hero-main">
+              <Tag color="gold">Dual Engine Studio</Tag>
+              <Title level={1}>Aurora Image Forge</Title>
+              <Paragraph>
+                面向生产场景的生图前端，OpenAI 侧采用 <Text code>gpt-5.5</Text> 驱动
+                <Text code>image_generation(model: gpt-image-2)</Text>，并集成 Gemini
+                <Text code>nanobanana2</Text>，支持文生图、图生图、参数调优、历史追溯与请求调试。
+              </Paragraph>
+              <Space wrap>
+                <Tag icon={<ThunderboltOutlined />}>艺术化 UI</Tag>
+                <Tag icon={<ApiOutlined />}>可编辑 URL / API</Tag>
+                <Tag icon={<PictureOutlined />}>文生图 + 图生图</Tag>
+              </Space>
+              <div className="iteration-roadmap">
+                {UI_UPGRADE_PLAN.map((item, index) => (
+                  <article key={item.title} className="roadmap-item">
+                    <span>迭代 0{index + 1}</span>
+                    <h4>{item.title}</h4>
+                    <p>{item.detail}</p>
+                  </article>
+                ))}
+              </div>
+            </div>
+
+            <div className="hero-metrics">
+              <div className="metric-item">
+                <span>当前引擎</span>
+                <strong>
+                  {connection.backendMode === 'n8n'
+                    ? `n8n 编排 · ${connection.provider === 'openai' ? 'ChatGPT' : 'Gemini'}`
+                    : connection.provider === 'openai'
+                      ? 'ChatGPT'
+                      : 'Gemini'}
+                </strong>
+              </div>
+              <div className="metric-item">
+                <span>当前模型</span>
+                <strong>{connection.model || '-'}</strong>
+              </div>
+              <div className="metric-item">
+                <span>最近状态</span>
+                <Badge
+                  status={
+                    runState.phase === 'success'
+                      ? 'success'
+                      : runState.phase === 'error'
+                        ? 'error'
+                        : 'processing'
+                  }
+                  text={runState.message}
+                />
+              </div>
+            </div>
           </div>
-          <div className="metric-item">
-            <span>当前模型</span>
-            <strong>{connection.model || '-'}</strong>
-          </div>
-          <div className="metric-item">
-            <span>最近状态</span>
-            <Badge
-              status={
-                runState.phase === 'success'
-                  ? 'success'
-                  : runState.phase === 'error'
-                    ? 'error'
-                    : 'processing'
-              }
-              text={runState.message}
-            />
-          </div>
-        </div>
-      </header>
+        ) : null}
+      </section>
 
       <div
         className={layoutCompact ? 'layout-grid layout-grid-compact' : 'layout-grid'}
@@ -6476,13 +6890,18 @@ function App() {
       >
         <div className="left-column">
           <Card
-            className="studio-card compact-card"
-            title={
-              <Space>
-                <ApiOutlined />
-                接口设置
-              </Space>
-            }
+            className={getSectionCardClassName(
+              'connection',
+              'studio-card',
+              'compact-card',
+              'connection-card',
+            )}
+            title={renderSectionTitle(
+              'connection',
+              <ApiOutlined />,
+              '接口设置',
+              connection.backendMode === 'n8n' ? 'n8n 编排与路由' : '直连 API 与鉴权',
+            )}
             extra={
               <Button
                 icon={<ReloadOutlined />}
@@ -6874,47 +7293,23 @@ function App() {
                 )}
               </Space>
             </div>
-
-            <div className="actions-row">
-              <Button
-                icon={isTesting ? <ClockCircleOutlined /> : <ApiOutlined />}
-                onClick={handleTestConnection}
-                loading={isTesting}
-              >
-                测试连接
-              </Button>
-              <Button
-                type="primary"
-                icon={<SendOutlined />}
-                onClick={handleGenerate}
-                loading={isGenerating}
-                disabled={isGenerateDisabled}
-              >
-                {generateButtonLabel}
-              </Button>
-              <Button danger onClick={handleCancel} disabled={!isGenerating}>
-                取消任务
-              </Button>
-            </div>
           </Card>
 
           <Card
-            className="studio-card compact-card prompt-card"
-            title={
-              <Space>
-                <SettingOutlined />
-                生成设置
-              </Space>
-            }
+            className={getSectionCardClassName(
+              'generationSettings',
+              'studio-card',
+              'compact-card',
+              'prompt-card',
+              'generation-card',
+            )}
+            title={renderSectionTitle(
+              'generationSettings',
+              <SettingOutlined />,
+              '生成设置',
+              `${generation.resolution} · ${generation.style} · ${generation.imageCount} 张`,
+            )}
           >
-            <Tabs
-              activeKey={mode}
-              items={modeTabs}
-              onChange={(nextKey) =>
-                setMode(nextKey === 'image-to-image' ? 'image-to-image' : 'text-to-image')
-              }
-            />
-
             <div className="field-grid generation-grid">
               <div className="field-block">
                 <Text className="field-label">分辨率</Text>
@@ -7658,13 +8053,17 @@ function App() {
 
         <div className="right-column">
           <Card
-            className="studio-card status-card"
-            title={
-              <Space>
-                <ThunderboltOutlined />
-                运行状态
-              </Space>
-            }
+            className={getSectionCardClassName(
+              'status',
+              'studio-card',
+              'status-card',
+            )}
+            title={renderSectionTitle(
+              'status',
+              <ThunderboltOutlined />,
+              '运行状态',
+              runState.message,
+            )}
           >
             <Alert
               type={
@@ -7704,13 +8103,17 @@ function App() {
           </Card>
 
           <Card
-            className="studio-card"
-            title={
-              <Space>
-                <ClockCircleOutlined />
-                任务队列
-              </Space>
-            }
+            className={getSectionCardClassName(
+              'queue',
+              'studio-card',
+              'queue-card',
+            )}
+            title={renderSectionTitle(
+              'queue',
+              <ClockCircleOutlined />,
+              '任务队列',
+              `总数 ${queueStats.total} · 运行 ${queueStats.running}`,
+            )}
             extra={
               <Space>
                 <Tag color={queuePaused ? 'orange' : 'green'}>
@@ -7797,13 +8200,17 @@ function App() {
           </Card>
 
           <Card
-            className="studio-card"
-            title={
-              <Space>
-                <ApiOutlined />
-                成本与健康
-              </Space>
-            }
+            className={getSectionCardClassName(
+              'costHealth',
+              'studio-card',
+              'cost-health-card',
+            )}
+            title={renderSectionTitle(
+              'costHealth',
+              <ApiOutlined />,
+              '成本与健康',
+              `今日 $${todayUsage.estimatedCostUsd.toFixed(2)} · 成功率 ${historyHealth.successRate}%`,
+            )}
           >
             <div className="cost-health-grid">
               <div className="metric-tile">
@@ -7850,13 +8257,17 @@ function App() {
           </Card>
 
           <Card
-            className="studio-card"
-            title={
-              <Space>
-                <ApiOutlined />
-                线路健康与能力矩阵
-              </Space>
-            }
+            className={getSectionCardClassName(
+              'endpointMatrix',
+              'studio-card',
+              'endpoint-matrix-card',
+            )}
+            title={renderSectionTitle(
+              'endpointMatrix',
+              <ApiOutlined />,
+              '线路健康与能力矩阵',
+              `${endpointHealth.filter((item) => item.ok).length} 条可用`,
+            )}
           >
             <div className="endpoint-health-list">
               {endpointHealth.length === 0 ? (
@@ -7900,13 +8311,17 @@ function App() {
           </Card>
 
           <Card
-            className="studio-card"
-            title={
-              <Space>
-                <ThunderboltOutlined />
-                错误诊断中心
-              </Space>
-            }
+            className={getSectionCardClassName(
+              'diagnostics',
+              'studio-card',
+              'diagnostics-card',
+            )}
+            title={renderSectionTitle(
+              'diagnostics',
+              <ThunderboltOutlined />,
+              '错误诊断中心',
+              `${filteredDiagnostics.length} 条诊断`,
+            )}
             extra={
               <Space>
                 <Select
@@ -7967,13 +8382,17 @@ function App() {
           </Card>
 
           <Card
-            className="studio-card"
-            title={
-              <Space>
-                <PictureOutlined />
-                审批与发布看板
-              </Space>
-            }
+            className={getSectionCardClassName(
+              'publish',
+              'studio-card',
+              'publish-card',
+            )}
+            title={renderSectionTitle(
+              'publish',
+              <PictureOutlined />,
+              '审批与发布看板',
+              `${publishedImages.length} 张已发布`,
+            )}
           >
             <Space wrap>
               <Text type="secondary">
@@ -8030,13 +8449,17 @@ function App() {
           </Card>
 
           <Card
-            className="studio-card"
-            title={
-              <Space>
-                <ThunderboltOutlined />
-                A/B 实验报告
-              </Space>
-            }
+            className={getSectionCardClassName(
+              'abReport',
+              'studio-card',
+              'ab-report-card',
+            )}
+            title={renderSectionTitle(
+              'abReport',
+              <ThunderboltOutlined />,
+              'A/B 实验报告',
+              abReport ? '已有对比结果' : '等待生成报告',
+            )}
           >
             <Space direction="vertical" style={{ width: '100%' }}>
               <Input value={generation.prompt} readOnly />
@@ -8064,13 +8487,17 @@ function App() {
           </Card>
 
           <Card
-            className="studio-card"
-            title={
-              <Space>
-                <HistoryOutlined />
-                安全审计日志
-              </Space>
-            }
+            className={getSectionCardClassName(
+              'auditLogs',
+              'studio-card',
+              'audit-logs-card',
+            )}
+            title={renderSectionTitle(
+              'auditLogs',
+              <HistoryOutlined />,
+              '安全审计日志',
+              `${auditLogs.length} 条记录`,
+            )}
             extra={
               <Button size="small" onClick={() => setAuditLogs([])}>
                 清空日志
@@ -8092,215 +8519,6 @@ function App() {
                 ))}
               </div>
             )}
-          </Card>
-
-          <Card
-            className="studio-card gallery-card"
-            title={
-              <Space>
-                <PictureOutlined />
-                当前画廊
-              </Space>
-            }
-            extra={
-              <Space>
-                <Button
-                  onClick={() => setShowOnlyKeptImages((previous) => !previous)}
-                >
-                  {showOnlyKeptImages ? '显示全部' : '仅看保留'}
-                </Button>
-                <Button onClick={() => void exportProjectZip()}>
-                  导出项目 ZIP
-                </Button>
-                <Button
-                  icon={<ReloadOutlined />}
-                  onClick={() => {
-                    setImages([])
-                    setPreviewImage(null)
-                    setImageReviews({})
-                    setQueueTasks([])
-                    setSseEvents([])
-                    setComparePick([])
-                    setCompareModalOpen(false)
-                    setImageMetadataMap({})
-                    setApprovalState({})
-                    setResponseText('')
-                    setRawResponse('')
-                    setRequestPreview('')
-                    setRunState(INITIAL_RUN_STATE)
-                  }}
-                >
-                  清空
-                </Button>
-              </Space>
-            }
-          >
-            {isGenerating ? (
-              <div className="gallery-loading">
-                <Text>正在生成中，请稍候...</Text>
-              </div>
-            ) : null}
-
-            {!isGenerating && images.length === 0 ? (
-              <Empty
-                description="暂无图片结果。请在左侧完成配置并点击「开始生成」。"
-                image={Empty.PRESENTED_IMAGE_SIMPLE}
-              />
-            ) : null}
-            {!isGenerating && images.length > 0 && visibleImages.length === 0 ? (
-              <Empty
-                description="当前过滤条件下没有图片（可切换为显示全部）。"
-                image={Empty.PRESENTED_IMAGE_SIMPLE}
-              />
-            ) : null}
-
-            {visibleImages.length > 0 ? (
-              <div className="image-grid">
-                {visibleImages.map((image) => (
-                  <article
-                    key={image.id}
-                    className="image-card"
-                    role="button"
-                    tabIndex={0}
-                    aria-label="查看大图"
-                    onClick={() => setPreviewImage(image)}
-                    onKeyDown={(event) => {
-                      if (event.key === 'Enter' || event.key === ' ') {
-                        event.preventDefault()
-                        setPreviewImage(image)
-                      }
-                    }}
-                  >
-                    <img src={image.src} alt="模型生成结果图" />
-                    <div className="image-actions">
-                      <Tooltip title="下载图片">
-                        <Button
-                          type="text"
-                          icon={<DownloadOutlined />}
-                          onClick={(event) => {
-                            event.stopPropagation()
-                            void downloadWithAutoName(image).catch(() => {
-                              messageApi.error('下载失败，请检查图片链接是否可访问')
-                            })
-                          }}
-                        />
-                      </Tooltip>
-                      <Tooltip title="设为图生图参考图">
-                        <Button
-                          type="text"
-                          icon={<UploadOutlined />}
-                          onClick={(event) => {
-                            event.stopPropagation()
-                            handleUseAsReferenceImage(image)
-                          }}
-                        />
-                      </Tooltip>
-                      <Tooltip title="加入对比">
-                        <Button
-                          type={comparePick.includes(image.src) ? 'default' : 'text'}
-                          onClick={(event) => {
-                            event.stopPropagation()
-                            toggleComparePick(image)
-                          }}
-                        >
-                          对比
-                        </Button>
-                      </Tooltip>
-                    </div>
-                    <div className="image-review-bar">
-                      <div onClick={(event) => event.stopPropagation()}>
-                        <Rate
-                          allowClear
-                          value={imageReviews[image.src]?.rating ?? 0}
-                          onChange={(value) => updateImageReview(image, { rating: value })}
-                        />
-                      </div>
-                      <Space size={6}>
-                        <Button
-                          size="small"
-                          type={imageReviews[image.src]?.decision === 'keep' ? 'primary' : 'default'}
-                          onClick={(event) => {
-                            event.stopPropagation()
-                            updateImageReview(image, {
-                              decision:
-                                imageReviews[image.src]?.decision === 'keep'
-                                  ? 'unrated'
-                                  : 'keep',
-                            })
-                          }}
-                        >
-                          保留
-                        </Button>
-                        <Button
-                          size="small"
-                          danger={imageReviews[image.src]?.decision === 'discard'}
-                          onClick={(event) => {
-                            event.stopPropagation()
-                            updateImageReview(image, {
-                              decision:
-                                imageReviews[image.src]?.decision === 'discard'
-                                  ? 'unrated'
-                                  : 'discard',
-                            })
-                          }}
-                        >
-                          淘汰
-                        </Button>
-                        {runtimeConfig.approvalFlowEnabled ? (
-                          <>
-                            <Button
-                              size="small"
-                              type={approvalState[image.src] === 'approved' ? 'primary' : 'default'}
-                              onClick={(event) => {
-                                event.stopPropagation()
-                                setApprovalState((previous) => ({
-                                  ...previous,
-                                  [image.src]: 'approved',
-                                }))
-                              }}
-                            >
-                              通过
-                            </Button>
-                            <Button
-                              size="small"
-                              danger={approvalState[image.src] === 'rejected'}
-                              onClick={(event) => {
-                                event.stopPropagation()
-                                setApprovalState((previous) => ({
-                                  ...previous,
-                                  [image.src]: previous[image.src] === 'rejected' ? 'pending' : 'rejected',
-                                }))
-                              }}
-                            >
-                              驳回
-                            </Button>
-                          </>
-                        ) : null}
-                        <Button
-                          size="small"
-                          onClick={(event) => {
-                            event.stopPropagation()
-                            publishImage(image)
-                          }}
-                        >
-                          发布
-                        </Button>
-                      </Space>
-                    </div>
-                    <div className="image-meta-inline">
-                      {runtimeConfig.similarityDedupeEnabled && duplicateImageSet[image.src] ? (
-                        <Tag color="orange">重复候选</Tag>
-                      ) : null}
-                      {runtimeConfig.approvalFlowEnabled ? (
-                        <Tag color={approvalState[image.src] === 'approved' ? 'green' : approvalState[image.src] === 'rejected' ? 'red' : 'default'}>
-                          审批：{approvalState[image.src] ?? 'pending'}
-                        </Tag>
-                      ) : null}
-                    </div>
-                  </article>
-                ))}
-              </div>
-            ) : null}
           </Card>
 
           <Modal
@@ -8445,13 +8663,18 @@ function App() {
           </Modal>
 
           <Card
-            className="studio-card output-card"
-            title={
-              <Space>
-                <SettingOutlined />
-                请求与响应调试
-              </Space>
-            }
+            className={getSectionCardClassName(
+              'debug',
+              'studio-card',
+              'output-card',
+              'debug-card',
+            )}
+            title={renderSectionTitle(
+              'debug',
+              <SettingOutlined />,
+              '请求与响应调试',
+              `SSE ${sseEvents.length} · 原始响应 ${rawResponse ? '已记录' : '暂无'}`,
+            )}
           >
             <Tabs
               items={[
@@ -8563,13 +8786,17 @@ function App() {
           </Card>
 
           <Card
-            className="studio-card"
-            title={
-              <Space>
-                <HistoryOutlined />
-                历史记录
-              </Space>
-            }
+            className={getSectionCardClassName(
+              'history',
+              'studio-card',
+              'history-card',
+            )}
+            title={renderSectionTitle(
+              'history',
+              <HistoryOutlined />,
+              '历史记录',
+              `${filteredHistory.length} 条可见`,
+            )}
             extra={
               <Space>
                 <Button onClick={deleteSelectedHistory} danger>
@@ -8728,13 +8955,18 @@ function App() {
           </Card>
 
           <Card
-            className="studio-card prompt-helper-card"
-            title={
-              <Space>
-                <ApiOutlined />
-                Prompt 参考站
-              </Space>
-            }
+            className={getSectionCardClassName(
+              'promptGuide',
+              'studio-card',
+              'prompt-helper-card',
+              'prompt-guide-card',
+            )}
+            title={renderSectionTitle(
+              'promptGuide',
+              <ApiOutlined />,
+              'Prompt 参考站',
+              '外部站点与内置速查',
+            )}
             extra={
               <Button
                 type="link"
