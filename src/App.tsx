@@ -19,11 +19,15 @@ import {
   Badge,
   Button,
   Card,
+  Checkbox,
   Collapse,
+  Divider,
   Empty,
   Input,
   InputNumber,
   Modal,
+  Progress,
+  Rate,
   Segmented,
   Select,
   Slider,
@@ -43,6 +47,8 @@ type StudioMode = 'text-to-image' | 'image-to-image'
 type RunPhase = 'idle' | 'testing' | 'running' | 'success' | 'error'
 type BatchMode = 'single' | 'prompt-list' | 'reroll'
 type PromptTemplateScope = 'all' | 'favorites' | 'recent'
+type QueueTaskStatus = 'pending' | 'running' | 'success' | 'error'
+type ImageDecision = 'keep' | 'discard' | 'unrated'
 
 interface ConnectionConfig {
   provider: Provider
@@ -91,6 +97,8 @@ interface HistoryRecord {
   model: string
   mode: StudioMode
   prompt: string
+  folder?: string
+  tags?: string[]
   endpoint: string
   status: 'success' | 'error'
   statusCode?: number
@@ -137,6 +145,91 @@ interface PromptTemplateStore {
   recent: string[]
 }
 
+interface ParameterPreset {
+  id: string
+  name: string
+  generation: GenerationConfig
+  batch: BatchConfig
+}
+
+interface QueueTask {
+  id: string
+  prompt: string
+  status: QueueTaskStatus
+  model: string
+  endpoint: string
+  startedAt?: number
+  finishedAt?: number
+  latencyMs?: number
+  message?: string
+}
+
+interface UsageStatSnapshot {
+  date: string
+  requests: number
+  images: number
+  estimatedCostUsd: number
+}
+
+interface UsageStore {
+  days: UsageStatSnapshot[]
+}
+
+interface GenerateRuntimeConfig {
+  maxConcurrency: number
+  requestIntervalMs: number
+  dailyImageQuota: number
+  dailyBudgetUsd: number
+  fallbackBaseUrls: string
+  qualityGuardEnabled: boolean
+  blockedWords: string
+  minPromptLength: number
+  enableSeedExperiment: boolean
+  seedDelta: number
+}
+
+interface HistoryFilter {
+  keyword: string
+  status: 'all' | 'success' | 'error'
+  mode: 'all' | StudioMode
+  folder: string
+  fromDate: string
+  toDate: string
+}
+
+interface ImageReview {
+  rating: number
+  note: string
+  decision: ImageDecision
+}
+
+interface WorkspaceProfile {
+  id: string
+  name: string
+  connection: ConnectionConfig
+  generation: GenerationConfig
+  batch: BatchConfig
+}
+
+interface MaskEditorState {
+  enabled: boolean
+  protectMode: 'keep-center' | 'edit-center'
+  maskNote: string
+}
+
+interface UploadAnalysis {
+  mimeType: string
+  sizeKb: number
+  width?: number
+  height?: number
+}
+
+interface StreamEventTrace {
+  at: string
+  type: string
+  preview: string
+}
+
 const { Title, Paragraph, Text } = Typography
 
 const CONNECTION_KEY = 'aurora-image-studio.connection.v1'
@@ -144,6 +237,10 @@ const GENERATION_KEY = 'aurora-image-studio.generation.v1'
 const HISTORY_KEY = 'aurora-image-studio.history.v1'
 const BATCH_KEY = 'aurora-image-studio.batch.v1'
 const PROMPT_TEMPLATE_KEY = 'aurora-image-studio.prompt-templates.v1'
+const PRESET_KEY = 'aurora-image-studio.parameter-presets.v1'
+const USAGE_KEY = 'aurora-image-studio.usage.v1'
+const RUNTIME_KEY = 'aurora-image-studio.runtime.v1'
+const WORKSPACE_KEY = 'aurora-image-studio.workspace.v1'
 
 const OPENAI_MODELS = ['gpt-5.4', 'gpt-5.2', 'gpt-5.4-mini']
 const GEMINI_MODELS = ['nanobanana2']
@@ -353,6 +450,38 @@ const DEFAULT_PROMPT_TEMPLATE_STORE: PromptTemplateStore = {
   recent: [],
 }
 
+const DEFAULT_RUNTIME_CONFIG: GenerateRuntimeConfig = {
+  maxConcurrency: 2,
+  requestIntervalMs: 300,
+  dailyImageQuota: 120,
+  dailyBudgetUsd: 15,
+  fallbackBaseUrls: '',
+  qualityGuardEnabled: true,
+  blockedWords: '血腥,暴力,仇恨,违法',
+  minPromptLength: 6,
+  enableSeedExperiment: false,
+  seedDelta: 77,
+}
+
+const DEFAULT_USAGE_STORE: UsageStore = {
+  days: [],
+}
+
+const DEFAULT_HISTORY_FILTER: HistoryFilter = {
+  keyword: '',
+  status: 'all',
+  mode: 'all',
+  folder: '',
+  fromDate: '',
+  toDate: '',
+}
+
+const DEFAULT_MASK_EDITOR: MaskEditorState = {
+  enabled: false,
+  protectMode: 'keep-center',
+  maskNote: '',
+}
+
 const INITIAL_RUN_STATE: RunState = {
   phase: 'idle',
   message: '等待任务启动',
@@ -539,6 +668,12 @@ function readStoredHistory(): HistoryRecord[] {
           model: typeof item.model === 'string' ? item.model : '',
           mode: item.mode === 'image-to-image' ? 'image-to-image' : 'text-to-image',
           prompt: typeof item.prompt === 'string' ? item.prompt : '',
+          folder: typeof item.folder === 'string' ? item.folder : '',
+          tags: Array.isArray(item.tags)
+            ? item.tags
+                .filter((tag): tag is string => typeof tag === 'string')
+                .slice(0, 8)
+            : [],
           endpoint: typeof item.endpoint === 'string' ? item.endpoint : '',
           status: item.status === 'error' ? 'error' : 'success',
           statusCode: typeof item.statusCode === 'number' ? item.statusCode : undefined,
@@ -584,6 +719,301 @@ function readStoredPromptTemplateStore(): PromptTemplateStore {
   }
 }
 
+function readStoredPresets(): ParameterPreset[] {
+  try {
+    const raw = localStorage.getItem(PRESET_KEY)
+    if (!raw) {
+      return []
+    }
+    const parsed: unknown = JSON.parse(raw)
+    if (!Array.isArray(parsed)) {
+      return []
+    }
+    return parsed
+      .filter((item) => isRecord(item))
+      .slice(0, 30)
+      .map((item, index) => ({
+        id: typeof item.id === 'string' ? item.id : `preset-${index}`,
+        name: typeof item.name === 'string' ? item.name : `预设 ${index + 1}`,
+        generation: {
+          ...DEFAULT_GENERATION,
+          ...(isRecord(item.generation) ? item.generation : {}),
+        } as GenerationConfig,
+        batch: {
+          ...DEFAULT_BATCH,
+          ...(isRecord(item.batch) ? item.batch : {}),
+        } as BatchConfig,
+      }))
+  } catch {
+    return []
+  }
+}
+
+function readUsageStore(): UsageStore {
+  const parsed = readStoredObject(USAGE_KEY, DEFAULT_USAGE_STORE)
+  if (!Array.isArray(parsed.days)) {
+    return DEFAULT_USAGE_STORE
+  }
+  const days = parsed.days
+    .filter((item) => isRecord(item))
+    .slice(0, 60)
+    .map((item) => ({
+      date: typeof item.date === 'string' ? item.date : '',
+      requests: typeof item.requests === 'number' ? item.requests : 0,
+      images: typeof item.images === 'number' ? item.images : 0,
+      estimatedCostUsd: typeof item.estimatedCostUsd === 'number' ? item.estimatedCostUsd : 0,
+    }))
+    .filter((item) => item.date)
+  return { days }
+}
+
+function readWorkspaceProfiles(): WorkspaceProfile[] {
+  try {
+    const raw = localStorage.getItem(WORKSPACE_KEY)
+    if (!raw) {
+      return []
+    }
+    const parsed: unknown = JSON.parse(raw)
+    if (!Array.isArray(parsed)) {
+      return []
+    }
+    return parsed
+      .filter((item) => isRecord(item))
+      .slice(0, 20)
+      .map((item, index) => ({
+        id: typeof item.id === 'string' ? item.id : `space-${index}`,
+        name: typeof item.name === 'string' ? item.name : `空间 ${index + 1}`,
+        connection: {
+          ...DEFAULT_CONNECTION,
+          ...(isRecord(item.connection) ? item.connection : {}),
+        } as ConnectionConfig,
+        generation: {
+          ...DEFAULT_GENERATION,
+          ...(isRecord(item.generation) ? item.generation : {}),
+        } as GenerationConfig,
+        batch: {
+          ...DEFAULT_BATCH,
+          ...(isRecord(item.batch) ? item.batch : {}),
+        } as BatchConfig,
+      }))
+  } catch {
+    return []
+  }
+}
+
+function getTodayStamp(): string {
+  const now = new Date()
+  const y = now.getFullYear()
+  const m = String(now.getMonth() + 1).padStart(2, '0')
+  const d = String(now.getDate()).padStart(2, '0')
+  return `${y}-${m}-${d}`
+}
+
+function estimateImageCostUsd(provider: Provider, imageCount: number, quality: GenerationConfig['quality']): number {
+  const unit =
+    provider === 'openai'
+      ? quality === 'high'
+        ? 0.08
+        : 0.04
+      : quality === 'high'
+        ? 0.03
+        : 0.015
+  return Number((Math.max(1, imageCount) * unit).toFixed(4))
+}
+
+function updateUsageStore(
+  store: UsageStore,
+  provider: Provider,
+  images: number,
+  quality: GenerationConfig['quality'],
+): UsageStore {
+  const today = getTodayStamp()
+  const cost = estimateImageCostUsd(provider, images, quality)
+  const days = [...store.days]
+  const index = days.findIndex((item) => item.date === today)
+  if (index >= 0) {
+    const snapshot = days[index]
+    days[index] = {
+      ...snapshot,
+      requests: snapshot.requests + 1,
+      images: snapshot.images + images,
+      estimatedCostUsd: Number((snapshot.estimatedCostUsd + cost).toFixed(4)),
+    }
+  } else {
+    days.unshift({
+      date: today,
+      requests: 1,
+      images,
+      estimatedCostUsd: cost,
+    })
+  }
+  return { days: days.slice(0, 60) }
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => {
+    window.setTimeout(resolve, ms)
+  })
+}
+
+function normalizeUrlLines(raw: string): string[] {
+  return raw
+    .split(/\r?\n/)
+    .map((item) => item.trim())
+    .filter(Boolean)
+    .filter((item, index, list) => list.indexOf(item) === index)
+}
+
+function parsePromptImport(raw: string): string[] {
+  const trimmed = raw.trim()
+  if (!trimmed) {
+    return []
+  }
+  if (trimmed.startsWith('[')) {
+    const parsed = safeJsonParse(trimmed)
+    if (Array.isArray(parsed)) {
+      return parsed
+        .map((item) => (typeof item === 'string' ? item.trim() : ''))
+        .filter(Boolean)
+    }
+  }
+  if (trimmed.startsWith('{')) {
+    const parsed = safeJsonParse(trimmed)
+    if (isRecord(parsed) && Array.isArray(parsed.prompts)) {
+      return parsed.prompts
+        .map((item) => (typeof item === 'string' ? item.trim() : ''))
+        .filter(Boolean)
+    }
+  }
+  if (trimmed.includes(',') && trimmed.split('\n').length <= 2) {
+    return trimmed
+      .split(',')
+      .map((item) => item.trim())
+      .filter(Boolean)
+  }
+  return parsePromptList(trimmed)
+}
+
+function validatePromptQuality(prompt: string, runtime: GenerateRuntimeConfig): string[] {
+  const issues: string[] = []
+  const trimmed = prompt.trim()
+  if (trimmed.length < runtime.minPromptLength) {
+    issues.push(`提示词长度不足（当前 ${trimmed.length}，最少 ${runtime.minPromptLength}）`)
+  }
+  const blockedWords = runtime.blockedWords
+    .split(/[,，\n]/)
+    .map((item) => item.trim())
+    .filter(Boolean)
+  const lowerPrompt = trimmed.toLowerCase()
+  const hits = blockedWords.filter((word) => lowerPrompt.includes(word.toLowerCase()))
+  if (hits.length > 0) {
+    issues.push(`命中敏感词：${hits.join('、')}`)
+  }
+  return issues
+}
+
+function utf8Bytes(text: string): Uint8Array {
+  return new TextEncoder().encode(text)
+}
+
+function crc32(bytes: Uint8Array): number {
+  const table = (() => {
+    const items = new Uint32Array(256)
+    for (let i = 0; i < 256; i += 1) {
+      let c = i
+      for (let j = 0; j < 8; j += 1) {
+        c = (c & 1) ? (0xedb88320 ^ (c >>> 1)) : (c >>> 1)
+      }
+      items[i] = c >>> 0
+    }
+    return items
+  })()
+  let crc = 0xffffffff
+  for (const byte of bytes) {
+    crc = table[(crc ^ byte) & 0xff] ^ (crc >>> 8)
+  }
+  return (crc ^ 0xffffffff) >>> 0
+}
+
+function makeZip(files: Array<{ name: string; data: Uint8Array }>): Uint8Array {
+  const localParts: Uint8Array[] = []
+  const centralParts: Uint8Array[] = []
+  let offset = 0
+
+  for (const file of files) {
+    const nameBytes = utf8Bytes(file.name)
+    const crc = crc32(file.data)
+    const localHeader = new Uint8Array(30 + nameBytes.length)
+    const localView = new DataView(localHeader.buffer)
+    localView.setUint32(0, 0x04034b50, true)
+    localView.setUint16(4, 20, true)
+    localView.setUint16(6, 0, true)
+    localView.setUint16(8, 0, true)
+    localView.setUint16(10, 0, true)
+    localView.setUint16(12, 0, true)
+    localView.setUint32(14, crc, true)
+    localView.setUint32(18, file.data.length, true)
+    localView.setUint32(22, file.data.length, true)
+    localView.setUint16(26, nameBytes.length, true)
+    localView.setUint16(28, 0, true)
+    localHeader.set(nameBytes, 30)
+
+    const centralHeader = new Uint8Array(46 + nameBytes.length)
+    const centralView = new DataView(centralHeader.buffer)
+    centralView.setUint32(0, 0x02014b50, true)
+    centralView.setUint16(4, 20, true)
+    centralView.setUint16(6, 20, true)
+    centralView.setUint16(8, 0, true)
+    centralView.setUint16(10, 0, true)
+    centralView.setUint16(12, 0, true)
+    centralView.setUint16(14, 0, true)
+    centralView.setUint32(16, crc, true)
+    centralView.setUint32(20, file.data.length, true)
+    centralView.setUint32(24, file.data.length, true)
+    centralView.setUint16(28, nameBytes.length, true)
+    centralView.setUint16(30, 0, true)
+    centralView.setUint16(32, 0, true)
+    centralView.setUint16(34, 0, true)
+    centralView.setUint16(36, 0, true)
+    centralView.setUint32(38, 0, true)
+    centralView.setUint32(42, offset, true)
+    centralHeader.set(nameBytes, 46)
+
+    localParts.push(localHeader, file.data)
+    centralParts.push(centralHeader)
+    offset += localHeader.length + file.data.length
+  }
+
+  const centralSize = centralParts.reduce((sum, part) => sum + part.length, 0)
+  const end = new Uint8Array(22)
+  const endView = new DataView(end.buffer)
+  endView.setUint32(0, 0x06054b50, true)
+  endView.setUint16(4, 0, true)
+  endView.setUint16(6, 0, true)
+  endView.setUint16(8, files.length, true)
+  endView.setUint16(10, files.length, true)
+  endView.setUint32(12, centralSize, true)
+  endView.setUint32(16, offset, true)
+  endView.setUint16(20, 0, true)
+
+  const totalSize =
+    localParts.reduce((sum, part) => sum + part.length, 0) +
+    centralSize +
+    end.length
+  const output = new Uint8Array(totalSize)
+  let cursor = 0
+  for (const part of localParts) {
+    output.set(part, cursor)
+    cursor += part.length
+  }
+  for (const part of centralParts) {
+    output.set(part, cursor)
+    cursor += part.length
+  }
+  output.set(end, cursor)
+  return output
+}
+
 function safeLocalStorageSet(key: string, value: string): void {
   try {
     localStorage.setItem(key, value)
@@ -600,6 +1030,8 @@ function sanitizeHistoryForStorage(records: HistoryRecord[]): HistoryRecord[] {
       .slice(0, 8),
     note: item.note.slice(0, 1200),
     responseSnippet: item.responseSnippet.slice(0, 1600),
+    folder: (item.folder ?? '').slice(0, 48),
+    tags: (item.tags ?? []).map((tag) => tag.slice(0, 24)).slice(0, 8),
   }))
 }
 
@@ -711,6 +1143,7 @@ interface StreamParseResult {
   raw: string
   eventTypes: string[]
   hasOutputItemDone: boolean
+  events: StreamEventTrace[]
 }
 
 function getNestedRecord(source: Record<string, unknown>, key: string): Record<string, unknown> | null {
@@ -787,6 +1220,7 @@ async function parseResponseSseStream(response: Response): Promise<StreamParseRe
   const textFragments: string[] = []
   const imagesBySrc = new Map<string, StudioImage>()
   const eventTypes = new Set<string>()
+  const events: StreamEventTrace[] = []
   let hasOutputItemDone = false
   let buffer = ''
   let fullText = ''
@@ -842,6 +1276,11 @@ async function parseResponseSseStream(response: Response): Promise<StreamParseRe
 
     if (typeof payload === 'string') {
       textFragments.push(payload)
+      events.push({
+        at: new Date().toISOString(),
+        type: eventType || 'message',
+        preview: payload.slice(0, 220),
+      })
       return
     }
 
@@ -863,6 +1302,14 @@ async function parseResponseSseStream(response: Response): Promise<StreamParseRe
         }
       }
     }
+    events.push({
+      at: new Date().toISOString(),
+      type: eventType || (isRecord(payload) && typeof payload.type === 'string' ? payload.type : 'event'),
+      preview:
+        typeof payload === 'string'
+          ? payload.slice(0, 220)
+          : JSON.stringify(payload).slice(0, 220),
+    })
 
     addImages(extractImagesFromOutputItemDoneEvent(eventType, payload))
 
@@ -926,6 +1373,7 @@ async function parseResponseSseStream(response: Response): Promise<StreamParseRe
     raw,
     eventTypes: Array.from(eventTypes.values()),
     hasOutputItemDone,
+    events: events.slice(-200),
   }
 }
 
@@ -1129,6 +1577,7 @@ function composePrompt(
   config: GenerationConfig,
   mode: StudioMode,
   source: ImageSourceState,
+  maskEditor?: MaskEditorState,
 ): string {
   const blocks: string[] = [config.prompt.trim()]
 
@@ -1149,6 +1598,16 @@ function composePrompt(
     )
     if (source.imageUrl.trim()) {
       blocks.push(`参考图 URL：${source.imageUrl.trim()}`)
+    }
+    if (maskEditor?.enabled) {
+      blocks.push(
+        maskEditor.protectMode === 'keep-center'
+          ? '局部重绘策略：优先保留主体中心区域，仅扩展或重绘边缘细节。'
+          : '局部重绘策略：优先重绘主体中心区域，尽量保持边缘背景结构。',
+      )
+      if (maskEditor.maskNote.trim()) {
+        blocks.push(`局部重绘备注：${maskEditor.maskNote.trim()}`)
+      }
     }
   }
 
@@ -1292,6 +1751,11 @@ async function prepareRequest(
   source: ImageSourceState,
   modelOverride?: string,
   promptOverride?: string,
+  options?: {
+    generationOverride?: Partial<GenerationConfig>
+    baseUrlOverride?: string
+    maskEditor?: MaskEditorState
+  },
 ): Promise<PreparedRequest> {
   const apiKey = connection.apiKey.trim()
   const extraHeaders = parseExtraHeaders(connection.extraHeaders)
@@ -1302,8 +1766,15 @@ async function prepareRequest(
           prompt: promptOverride,
         }
       : generation
-  const prompt = composePrompt(effectiveGeneration, mode, source)
-  const runtimeBaseUrl = resolveRuntimeBaseUrl(connection.baseUrl)
+  const mergedGeneration =
+    options?.generationOverride
+      ? {
+          ...effectiveGeneration,
+          ...options.generationOverride,
+        }
+      : effectiveGeneration
+  const prompt = composePrompt(mergedGeneration, mode, source, options?.maskEditor)
+  const runtimeBaseUrl = resolveRuntimeBaseUrl(options?.baseUrlOverride ?? connection.baseUrl)
   const requestedModel = (modelOverride ?? connection.model).trim()
 
   if (connection.provider === 'openai') {
@@ -1375,15 +1846,15 @@ async function prepareRequest(
     const basePayload: Record<string, unknown> = {
       model: requestedModel,
       prompt,
-      n: effectiveGeneration.imageCount,
-      size: effectiveGeneration.resolution,
-      quality: effectiveGeneration.quality,
-      output_format: effectiveGeneration.outputFormat,
-      background: effectiveGeneration.background,
+      n: mergedGeneration.imageCount,
+      size: mergedGeneration.resolution,
+      quality: mergedGeneration.quality,
+      output_format: mergedGeneration.outputFormat,
+      background: mergedGeneration.background,
     }
 
-    if (effectiveGeneration.seed !== null) {
-      basePayload.seed = effectiveGeneration.seed
+    if (mergedGeneration.seed !== null) {
+      basePayload.seed = mergedGeneration.seed
     }
 
     if (mode === 'text-to-image') {
@@ -1406,15 +1877,15 @@ async function prepareRequest(
       const formData = new FormData()
       formData.set('model', requestedModel)
       formData.set('prompt', prompt)
-      formData.set('n', String(effectiveGeneration.imageCount))
-      formData.set('size', effectiveGeneration.resolution)
-      formData.set('quality', effectiveGeneration.quality)
-      formData.set('output_format', effectiveGeneration.outputFormat)
-      formData.set('background', effectiveGeneration.background)
-      formData.set('strength', effectiveGeneration.strength.toFixed(2))
+      formData.set('n', String(mergedGeneration.imageCount))
+      formData.set('size', mergedGeneration.resolution)
+      formData.set('quality', mergedGeneration.quality)
+      formData.set('output_format', mergedGeneration.outputFormat)
+      formData.set('background', mergedGeneration.background)
+      formData.set('strength', mergedGeneration.strength.toFixed(2))
       formData.set('image', source.file)
-      if (effectiveGeneration.seed !== null) {
-        formData.set('seed', String(effectiveGeneration.seed))
+      if (mergedGeneration.seed !== null) {
+        formData.set('seed', String(mergedGeneration.seed))
       }
       if (source.imageUrl.trim()) {
         formData.set('image_url', source.imageUrl.trim())
@@ -1434,7 +1905,7 @@ async function prepareRequest(
 
     if (source.imageUrl.trim()) {
       basePayload.image_url = source.imageUrl.trim()
-      basePayload.strength = Number(effectiveGeneration.strength.toFixed(2))
+      basePayload.strength = Number(mergedGeneration.strength.toFixed(2))
       const requestPreview = JSON.stringify(basePayload, null, 2)
       return {
         endpoint,
@@ -1494,16 +1965,16 @@ async function prepareRequest(
   parts.push({ text: prompt })
 
   const generationConfig: Record<string, unknown> = {
-    temperature: effectiveGeneration.temperature,
-    candidateCount: effectiveGeneration.imageCount,
+    temperature: mergedGeneration.temperature,
+    candidateCount: mergedGeneration.imageCount,
     responseModalities: ['TEXT', 'IMAGE'],
   }
 
-  if (effectiveGeneration.aspectRatio !== 'auto') {
-    generationConfig.aspectRatio = effectiveGeneration.aspectRatio
+  if (mergedGeneration.aspectRatio !== 'auto') {
+    generationConfig.aspectRatio = mergedGeneration.aspectRatio
   }
-  if (effectiveGeneration.seed !== null) {
-    generationConfig.seed = effectiveGeneration.seed
+  if (mergedGeneration.seed !== null) {
+    generationConfig.seed = mergedGeneration.seed
   }
 
   const payload = {
@@ -1560,6 +2031,28 @@ function App() {
   const [promptTemplateStore, setPromptTemplateStore] = useState<PromptTemplateStore>(() =>
     readStoredPromptTemplateStore(),
   )
+  const [presets, setPresets] = useState<ParameterPreset[]>(() => readStoredPresets())
+  const [usageStore, setUsageStore] = useState<UsageStore>(() => readUsageStore())
+  const [runtimeConfig, setRuntimeConfig] = useState<GenerateRuntimeConfig>(() =>
+    readStoredObject(RUNTIME_KEY, DEFAULT_RUNTIME_CONFIG),
+  )
+  const [queueTasks, setQueueTasks] = useState<QueueTask[]>([])
+  const [historyFilter, setHistoryFilter] = useState<HistoryFilter>(DEFAULT_HISTORY_FILTER)
+  const [historySelection, setHistorySelection] = useState<string[]>([])
+  const [historyFolderInput, setHistoryFolderInput] = useState('默认')
+  const [historyTagsInput, setHistoryTagsInput] = useState('')
+  const [imageReviews, setImageReviews] = useState<Record<string, ImageReview>>({})
+  const [workspaceProfiles, setWorkspaceProfiles] = useState<WorkspaceProfile[]>(() =>
+    readWorkspaceProfiles(),
+  )
+  const [workspaceNameInput, setWorkspaceNameInput] = useState('')
+  const [sseEvents, setSseEvents] = useState<StreamEventTrace[]>([])
+  const [maskEditor, setMaskEditor] = useState<MaskEditorState>(DEFAULT_MASK_EDITOR)
+  const [importPromptText, setImportPromptText] = useState('')
+  const [layoutCompact, setLayoutCompact] = useState(false)
+  const [leftPanePercent, setLeftPanePercent] = useState(44)
+  const [showOnlyKeptImages, setShowOnlyKeptImages] = useState(false)
+  const [uploadAnalysis, setUploadAnalysis] = useState<UploadAnalysis | null>(null)
   const [templateScope, setTemplateScope] = useState<PromptTemplateScope>('all')
   const [templateCategory, setTemplateCategory] = useState<string>('all')
   const [templateQuery, setTemplateQuery] = useState('')
@@ -1580,6 +2073,8 @@ function App() {
 
   const abortRef = useRef<AbortController | null>(null)
   const previewUrlRef = useRef<string>('')
+  const hotkeyGenerateRef = useRef<() => Promise<void>>(async () => {})
+  const hotkeyCancelRef = useRef<() => void>(() => {})
   const [messageApi, contextHolder] = message.useMessage()
 
   useEffect(() => {
@@ -1599,6 +2094,22 @@ function App() {
   }, [promptTemplateStore])
 
   useEffect(() => {
+    safeLocalStorageSet(PRESET_KEY, JSON.stringify(presets))
+  }, [presets])
+
+  useEffect(() => {
+    safeLocalStorageSet(USAGE_KEY, JSON.stringify(usageStore))
+  }, [usageStore])
+
+  useEffect(() => {
+    safeLocalStorageSet(RUNTIME_KEY, JSON.stringify(runtimeConfig))
+  }, [runtimeConfig])
+
+  useEffect(() => {
+    safeLocalStorageSet(WORKSPACE_KEY, JSON.stringify(workspaceProfiles))
+  }, [workspaceProfiles])
+
+  useEffect(() => {
     safeLocalStorageSet(HISTORY_KEY, JSON.stringify(sanitizeHistoryForStorage(history)))
   }, [history])
 
@@ -1609,6 +2120,29 @@ function App() {
       }
     }
   }, [])
+
+  useEffect(() => {
+    const hash = window.location.hash || ''
+    if (!hash.startsWith('#share=')) {
+      return
+    }
+    const encoded = hash.slice('#share='.length)
+    try {
+      const decoded = decodeURIComponent(escape(atob(encoded)))
+      const payload = safeJsonParse(decoded)
+      if (isRecord(payload)) {
+        if (isRecord(payload.generation)) {
+          setGeneration((previous) => ({ ...previous, ...(payload.generation as Partial<GenerationConfig>) }))
+        }
+        if (isRecord(payload.batch)) {
+          setBatchConfig((previous) => ({ ...previous, ...(payload.batch as Partial<BatchConfig>) }))
+        }
+        messageApi.success('已从分享链接恢复参数（只读）')
+      }
+    } catch {
+      // Ignore invalid share payload
+    }
+  }, [messageApi])
 
   const providerModelOptions = useMemo(
     () => (connection.provider === 'openai' ? OPENAI_MODELS : GEMINI_MODELS),
@@ -1654,6 +2188,85 @@ function App() {
     const path = connection.geminiPathTemplate.replace('{model}', connection.model.trim())
     return buildUrl(runtimeBaseUrl, path)
   }, [connection, mode])
+
+  const todayUsage = useMemo(() => {
+    const today = getTodayStamp()
+    return (
+      usageStore.days.find((item) => item.date === today) ?? {
+        date: today,
+        requests: 0,
+        images: 0,
+        estimatedCostUsd: 0,
+      }
+    )
+  }, [usageStore.days])
+
+  const historyHealth = useMemo(() => {
+    if (history.length === 0) {
+      return {
+        successRate: 0,
+        avgLatencyMs: 0,
+        errors24h: 0,
+      }
+    }
+    const successCount = history.filter((item) => item.status === 'success').length
+    const latencies = history
+      .map((item) => item.latencyMs)
+      .filter((item): item is number => typeof item === 'number' && item > 0)
+    const avgLatencyMs =
+      latencies.length > 0
+        ? Math.round(latencies.reduce((sum, value) => sum + value, 0) / latencies.length)
+        : 0
+    const oneDayAgo = Date.now() - 24 * 60 * 60 * 1000
+    const errors24h = history.filter(
+      (item) => item.status === 'error' && new Date(item.createdAt).getTime() >= oneDayAgo,
+    ).length
+    return {
+      successRate: Math.round((successCount / history.length) * 100),
+      avgLatencyMs,
+      errors24h,
+    }
+  }, [history])
+
+  const filteredHistory = useMemo(() => {
+    const keyword = historyFilter.keyword.trim().toLowerCase()
+    const folderKeyword = historyFilter.folder.trim().toLowerCase()
+    const fromTime = historyFilter.fromDate ? new Date(`${historyFilter.fromDate}T00:00:00`).getTime() : 0
+    const toTime = historyFilter.toDate ? new Date(`${historyFilter.toDate}T23:59:59`).getTime() : 0
+    return history.filter((item) => {
+      if (historyFilter.status !== 'all' && item.status !== historyFilter.status) {
+        return false
+      }
+      if (historyFilter.mode !== 'all' && item.mode !== historyFilter.mode) {
+        return false
+      }
+      const folder = (item.folder ?? '').toLowerCase()
+      if (folderKeyword && !folder.includes(folderKeyword)) {
+        return false
+      }
+      if (keyword) {
+        const haystack = [item.prompt, item.model, item.note, (item.tags ?? []).join(' ')].join(' ').toLowerCase()
+        if (!haystack.includes(keyword)) {
+          return false
+        }
+      }
+      const time = new Date(item.createdAt).getTime()
+      if (fromTime && time < fromTime) {
+        return false
+      }
+      if (toTime && time > toTime) {
+        return false
+      }
+      return true
+    })
+  }, [history, historyFilter])
+
+  const visibleImages = useMemo(() => {
+    if (!showOnlyKeptImages) {
+      return images
+    }
+    return images.filter((image) => imageReviews[image.src]?.decision === 'keep')
+  }, [images, imageReviews, showOnlyKeptImages])
 
   const promptTemplateById = useMemo(
     () => new Map(PROMPT_TEMPLATE_LIBRARY.map((item) => [item.id, item])),
@@ -1757,6 +2370,212 @@ function App() {
     })
   }
 
+  const saveCurrentPreset = () => {
+    const name = window.prompt('输入参数预设名称', `预设-${new Date().toLocaleTimeString()}`)?.trim()
+    if (!name) {
+      return
+    }
+    setPresets((previous) => {
+      const duplicate = previous.find((item) => item.name === name)
+      if (duplicate) {
+        return previous.map((item) =>
+          item.id === duplicate.id
+            ? {
+                ...item,
+                generation: generation,
+                batch: batchConfig,
+              }
+            : item,
+        )
+      }
+      return [
+        {
+          id: crypto.randomUUID(),
+          name,
+          generation,
+          batch: batchConfig,
+        },
+        ...previous,
+      ].slice(0, 30)
+    })
+    messageApi.success(`已保存参数预设：${name}`)
+  }
+
+  const applyPreset = (presetId: string) => {
+    const matched = presets.find((item) => item.id === presetId)
+    if (!matched) {
+      return
+    }
+    setGeneration(matched.generation)
+    setBatchConfig(matched.batch)
+    messageApi.success(`已套用预设：${matched.name}`)
+  }
+
+  const removePreset = (presetId: string) => {
+    const matched = presets.find((item) => item.id === presetId)
+    setPresets((previous) => previous.filter((item) => item.id !== presetId))
+    if (matched) {
+      messageApi.success(`已删除预设：${matched.name}`)
+    }
+  }
+
+  const saveWorkspaceProfile = () => {
+    const name = workspaceNameInput.trim() || `空间-${new Date().toLocaleTimeString()}`
+    setWorkspaceProfiles((previous) => [
+      {
+        id: crypto.randomUUID(),
+        name,
+        connection,
+        generation,
+        batch: batchConfig,
+      },
+      ...previous,
+    ].slice(0, 20))
+    setWorkspaceNameInput('')
+    messageApi.success(`已保存协作空间：${name}`)
+  }
+
+  const applyWorkspaceProfile = (profileId: string) => {
+    const profile = workspaceProfiles.find((item) => item.id === profileId)
+    if (!profile) {
+      return
+    }
+    setConnection(profile.connection)
+    setGeneration(profile.generation)
+    setBatchConfig(profile.batch)
+    messageApi.success(`已切换到空间：${profile.name}`)
+  }
+
+  const deleteWorkspaceProfile = (profileId: string) => {
+    setWorkspaceProfiles((previous) => previous.filter((item) => item.id !== profileId))
+  }
+
+  const exportReadonlyShareLink = () => {
+    const payload = {
+      generation,
+      batch: batchConfig,
+      prompt: generation.prompt,
+      createdAt: new Date().toISOString(),
+    }
+    try {
+      const encoded = btoa(unescape(encodeURIComponent(JSON.stringify(payload))))
+      const url = `${window.location.origin}${window.location.pathname}#share=${encoded}`
+      void navigator.clipboard
+        .writeText(url)
+        .then(() => messageApi.success('只读分享链接已复制'))
+        .catch(() => messageApi.error('复制失败，请手动复制'))
+    } catch {
+      messageApi.error('生成分享链接失败')
+    }
+  }
+
+  const importPromptLines = () => {
+    const prompts = parsePromptImport(importPromptText)
+    if (prompts.length === 0) {
+      messageApi.error('未解析到可用提示词，请粘贴 TXT/CSV/JSON 内容')
+      return
+    }
+    setBatchConfig((previous) => ({
+      ...previous,
+      mode: 'prompt-list',
+      promptList: prompts.join('\n'),
+    }))
+    messageApi.success(`已导入 ${prompts.length} 条提示词`)
+  }
+
+  const updateImageReview = (
+    image: StudioImage,
+    patch: Partial<ImageReview>,
+  ) => {
+    setImageReviews((previous) => {
+      const current = previous[image.src] ?? {
+        rating: 0,
+        note: '',
+        decision: 'unrated' as ImageDecision,
+      }
+      return {
+        ...previous,
+        [image.src]: {
+          ...current,
+          ...patch,
+        },
+      }
+    })
+  }
+
+  const clearHistorySelection = () => {
+    setHistorySelection([])
+  }
+
+  const deleteSelectedHistory = () => {
+    if (historySelection.length === 0) {
+      messageApi.warning('请先选择历史记录')
+      return
+    }
+    setHistory((previous) => previous.filter((item) => !historySelection.includes(item.id)))
+    setHistorySelection([])
+    messageApi.success(`已删除 ${historySelection.length} 条历史记录`)
+  }
+
+  const exportProjectZip = async () => {
+    try {
+      const files: Array<{ name: string; data: Uint8Array }> = []
+      const manifest: Record<string, unknown> = {
+        exportedAt: new Date().toISOString(),
+        generation,
+        batch: batchConfig,
+        history: filteredHistory.slice(0, 60),
+        images: images.map((image) => ({
+          src: image.src,
+          mimeType: image.mimeType,
+          review: imageReviews[image.src] ?? null,
+        })),
+      }
+      files.push({
+        name: 'project.json',
+        data: utf8Bytes(JSON.stringify(manifest, null, 2)),
+      })
+
+      let downloaded = 0
+      for (let index = 0; index < images.length; index += 1) {
+        const image = images[index]
+        try {
+          const response = await fetch(image.src)
+          const blob = await response.blob()
+          const bytes = new Uint8Array(await blob.arrayBuffer())
+          const extension = image.mimeType.includes('jpeg')
+            ? 'jpg'
+            : image.mimeType.includes('webp')
+              ? 'webp'
+              : 'png'
+          files.push({
+            name: `images/${String(index + 1).padStart(3, '0')}.${extension}`,
+            data: bytes,
+          })
+          downloaded += 1
+        } catch {
+          // Cross-origin or dead URL can fail; manifest already keeps original URL.
+        }
+      }
+
+      const zipBytes = makeZip(files)
+      const zipBuffer = new ArrayBuffer(zipBytes.byteLength)
+      new Uint8Array(zipBuffer).set(zipBytes)
+      const blob = new Blob([zipBuffer], { type: 'application/zip' })
+      const objectUrl = URL.createObjectURL(blob)
+      const anchor = document.createElement('a')
+      anchor.href = objectUrl
+      anchor.download = `img-generator-project-${Date.now()}.zip`
+      document.body.appendChild(anchor)
+      anchor.click()
+      anchor.remove()
+      URL.revokeObjectURL(objectUrl)
+      messageApi.success(`导出完成：${files.length} 个文件（图片 ${downloaded}/${images.length}）`)
+    } catch {
+      messageApi.error('导出 ZIP 失败，请稍后重试')
+    }
+  }
+
   const handleProviderChange = (nextProvider: string) => {
     if (nextProvider !== 'openai' && nextProvider !== 'gemini') {
       return
@@ -1784,6 +2603,24 @@ function App() {
       file: nextFile,
       previewUrl,
     }))
+    setUploadAnalysis({
+      mimeType: nextFile.type || 'unknown',
+      sizeKb: Math.round(nextFile.size / 1024),
+    })
+    void (async () => {
+      try {
+        const bitmap = await createImageBitmap(nextFile)
+        setUploadAnalysis({
+          mimeType: nextFile.type || 'unknown',
+          sizeKb: Math.round(nextFile.size / 1024),
+          width: bitmap.width,
+          height: bitmap.height,
+        })
+        bitmap.close()
+      } catch {
+        // ignore
+      }
+    })()
   }
 
   const handleUseAsReferenceImage = (image: StudioImage) => {
@@ -1835,6 +2672,93 @@ function App() {
       return
     }
 
+    if (runtimeConfig.qualityGuardEnabled) {
+      const qualityIssues = validatePromptQuality(generation.prompt, runtimeConfig)
+      if (qualityIssues.length > 0) {
+        messageApi.error(`质量守门触发：${qualityIssues.join('；')}`)
+        return
+      }
+    }
+
+    const seedExperimentActive = runtimeConfig.enableSeedExperiment && generation.seed !== null
+    const totalJobCount = promptQueue.length * (seedExperimentActive ? 2 : 1)
+    const predictedImageCount = totalJobCount * Math.max(1, generation.imageCount)
+    const estimatedCost = estimateImageCostUsd(
+      connection.provider,
+      predictedImageCount,
+      generation.quality,
+    )
+    if (todayUsage.images + predictedImageCount > runtimeConfig.dailyImageQuota) {
+      messageApi.error(
+        `超出今日配额：预计 ${predictedImageCount} 张，今日剩余 ${
+          Math.max(0, runtimeConfig.dailyImageQuota - todayUsage.images)
+        } 张`,
+      )
+      return
+    }
+    if (todayUsage.estimatedCostUsd + estimatedCost > runtimeConfig.dailyBudgetUsd) {
+      messageApi.error(
+        `超出今日预算：预计 $${estimatedCost.toFixed(2)}，剩余额度 $${Math.max(
+          0,
+          runtimeConfig.dailyBudgetUsd - todayUsage.estimatedCostUsd,
+        ).toFixed(2)}`,
+      )
+      return
+    }
+
+    const baseCandidates = [
+      connection.baseUrl,
+      ...normalizeUrlLines(runtimeConfig.fallbackBaseUrls),
+    ].filter((item, index, list) => item.trim() && list.indexOf(item) === index)
+
+    const historyTags = historyTagsInput
+      .split(/[,，\s]+/)
+      .map((item) => item.trim())
+      .filter(Boolean)
+      .slice(0, 8)
+
+    type GenerationJob = {
+      id: string
+      prompt: string
+      seedLabel: string
+      generationOverride?: Partial<GenerationConfig>
+    }
+
+    const jobs: GenerationJob[] = []
+    for (const prompt of promptQueue) {
+      if (seedExperimentActive && generation.seed !== null) {
+        jobs.push({
+          id: crypto.randomUUID(),
+          prompt,
+          seedLabel: `seed ${generation.seed}`,
+          generationOverride: { seed: generation.seed },
+        })
+        jobs.push({
+          id: crypto.randomUUID(),
+          prompt,
+          seedLabel: `seed ${generation.seed + runtimeConfig.seedDelta}`,
+          generationOverride: { seed: generation.seed + runtimeConfig.seedDelta },
+        })
+      } else {
+        jobs.push({
+          id: crypto.randomUUID(),
+          prompt,
+          seedLabel: generation.seed !== null ? `seed ${generation.seed}` : 'random seed',
+        })
+      }
+    }
+
+    setQueueTasks(
+      jobs.map((job) => ({
+        id: job.id,
+        prompt: job.prompt,
+        status: 'pending',
+        model: '',
+        endpoint: '',
+        message: job.seedLabel,
+      })),
+    )
+
     setIsGenerating(true)
     setRunState({
       phase: 'running',
@@ -1843,170 +2767,262 @@ function App() {
     })
     setResponseText('')
     setRawResponse('')
+    setSseEvents([])
 
     const controller = new AbortController()
     abortRef.current = controller
     const batchStartedAt = performance.now()
-    const isBatchRun = promptQueue.length > 1
+    const isBatchRun = jobs.length > 1
     let attemptedModel = connection.model.trim()
     let attemptedEndpoint = endpointPreview
-    let attemptedPrompt = generation.prompt.trim()
+    let attemptedPrompt = jobs[0]?.prompt ?? generation.prompt.trim()
     let lastStatusCode: number | undefined
     let lastAttemptLatencyMs: number | undefined
     const aggregatedImages: StudioImage[] = []
     const textualSummaries: string[] = []
 
     try {
-      for (let taskIndex = 0; taskIndex < promptQueue.length; taskIndex += 1) {
-        const taskPrompt = promptQueue[taskIndex]
+      for (let taskIndex = 0; taskIndex < jobs.length; taskIndex += 1) {
+        const job = jobs[taskIndex]
+        const taskPrompt = job.prompt
         attemptedPrompt = taskPrompt
         const modelCandidates = buildModelCandidates(connection.provider, connection.model)
         let taskSucceeded = false
         let taskFailureMessage = ''
+        let taskFailureEndpoint = ''
+
+        setQueueTasks((previous) =>
+          previous.map((item) =>
+            item.id === job.id
+              ? {
+                  ...item,
+                  status: 'running',
+                  startedAt: performance.now(),
+                }
+              : item,
+          ),
+        )
 
         for (let modelIndex = 0; modelIndex < modelCandidates.length; modelIndex += 1) {
           const candidateModel = modelCandidates[modelIndex]
           attemptedModel = candidateModel
-          const attemptStartedAt = performance.now()
-
-          const request = await prepareRequest(
-            mode,
-            connection,
-            generation,
-            source,
-            candidateModel,
-            taskPrompt,
-          )
-          attemptedEndpoint = request.endpoint
-          setRequestPreview(request.requestPreview)
-          setRunState({
-            phase: 'running',
-            message: isBatchRun
-              ? `批量执行 ${taskIndex + 1}/${promptQueue.length} · 模型 ${candidateModel}`
-              : modelCandidates.length > 1
-                ? `正在尝试模型 ${candidateModel}（${modelIndex + 1}/${modelCandidates.length}）`
-                : '任务已提交，正在等待模型生成图像',
-            endpoint: request.endpoint,
-          })
-
-          const response = await fetch(request.endpoint, {
-            ...request.init,
-            signal: controller.signal,
-          })
-          lastStatusCode = response.status
-          lastAttemptLatencyMs = Math.round(performance.now() - attemptStartedAt)
-          const responseContentType = (response.headers.get('content-type') ?? '').toLowerCase()
-          const shouldParseSse =
-            Boolean(request.expectsSse) ||
-            responseContentType.includes('text/event-stream') ||
-            isResponsesEndpoint(request.endpoint)
-
-          if (!response.ok) {
-            const raw = await response.text()
-            const payload = safeJsonParse(raw)
-            setRawResponse(
-              typeof payload === 'string' ? payload : JSON.stringify(payload, null, 2),
-            )
-            const failure = extractError(payload, response.status)
-            const hasFallback = modelIndex < modelCandidates.length - 1
-            if (MODEL_UNAVAILABLE_PATTERN.test(failure) && hasFallback) {
-              const nextModel = modelCandidates[modelIndex + 1]
-              setResponseText(
-                `模型 ${candidateModel} 当前不可用，正在自动切换到 ${nextModel} 重试...`,
+          for (let baseIndex = 0; baseIndex < baseCandidates.length; baseIndex += 1) {
+            const baseCandidate = baseCandidates[baseIndex]
+            const attemptStartedAt = performance.now()
+            try {
+              const request = await prepareRequest(
+                mode,
+                connection,
+                generation,
+                source,
+                candidateModel,
+                taskPrompt,
+                {
+                  generationOverride: job.generationOverride,
+                  baseUrlOverride: baseCandidate,
+                  maskEditor,
+                },
               )
-              continue
+              attemptedEndpoint = request.endpoint
+              taskFailureEndpoint = request.endpoint
+              setRequestPreview(request.requestPreview)
+              setRunState({
+                phase: 'running',
+                message: isBatchRun
+                  ? `队列 ${taskIndex + 1}/${jobs.length} · ${job.seedLabel} · ${candidateModel}`
+                  : modelCandidates.length > 1
+                    ? `正在尝试模型 ${candidateModel}（${modelIndex + 1}/${modelCandidates.length}）`
+                    : '任务已提交，正在等待模型生成图像',
+                endpoint: request.endpoint,
+              })
+              setQueueTasks((previous) =>
+                previous.map((item) =>
+                  item.id === job.id
+                    ? {
+                        ...item,
+                        model: candidateModel,
+                        endpoint: request.endpoint,
+                      }
+                    : item,
+                ),
+              )
+
+              const response = await fetch(request.endpoint, {
+                ...request.init,
+                signal: controller.signal,
+              })
+              lastStatusCode = response.status
+              lastAttemptLatencyMs = Math.round(performance.now() - attemptStartedAt)
+              const responseContentType = (response.headers.get('content-type') ?? '').toLowerCase()
+              const shouldParseSse =
+                Boolean(request.expectsSse) ||
+                responseContentType.includes('text/event-stream') ||
+                isResponsesEndpoint(request.endpoint)
+
+              if (!response.ok) {
+                const raw = await response.text()
+                const payload = safeJsonParse(raw)
+                setRawResponse(
+                  typeof payload === 'string' ? payload : JSON.stringify(payload, null, 2),
+                )
+                const failure = extractError(payload, response.status)
+                if (
+                  MODEL_UNAVAILABLE_PATTERN.test(failure) &&
+                  modelIndex < modelCandidates.length - 1
+                ) {
+                  const nextModel = modelCandidates[modelIndex + 1]
+                  setResponseText(
+                    `模型 ${candidateModel} 当前不可用，正在自动切换到 ${nextModel} 重试...`,
+                  )
+                  break
+                }
+                taskFailureMessage =
+                  mode === 'image-to-image' &&
+                  Boolean(source.file) &&
+                  INPUT_STREAM_ERROR_PATTERN.test(failure)
+                    ? `图生图输入流异常：${failure}。已自动做上传图规范化，若仍失败请改用外链图片 URL 或更小的 JPG/PNG。`
+                    : failure
+                if (response.status >= 500 || isLikelyFetchNetworkError(failure)) {
+                  continue
+                }
+                break
+              }
+
+              let nextImages: StudioImage[] = []
+              let outputText = ''
+              let raw = ''
+              let streamEventTypes: string[] = []
+              let streamHasOutputItemDone = false
+
+              if (shouldParseSse) {
+                const streamResult = await parseResponseSseStream(response)
+                nextImages = streamResult.images
+                outputText = streamResult.outputText
+                raw = streamResult.raw
+                streamEventTypes = streamResult.eventTypes
+                streamHasOutputItemDone = streamResult.hasOutputItemDone
+                setSseEvents((previous) => [...previous, ...streamResult.events].slice(-800))
+                setRawResponse(raw || 'SSE 流式响应已消费，但无可展示原文。')
+              } else {
+                raw = await response.text()
+                const payload = safeJsonParse(raw)
+                setRawResponse(
+                  typeof payload === 'string' ? payload : JSON.stringify(payload, null, 2),
+                )
+                nextImages = extractImages(payload)
+                outputText = extractText(payload)
+              }
+
+              if (nextImages.length === 0) {
+                if (shouldParseSse) {
+                  const recentEventTypes =
+                    streamEventTypes.length > 0
+                      ? streamEventTypes.slice(0, 10).join(', ')
+                      : '未解析到事件类型'
+                  taskFailureMessage = streamHasOutputItemDone
+                    ? `接口返回成功，检测到 response.output_item.done，但事件中未提取到可用图片数据（item.result 可能为空）。事件类型：${recentEventTypes}`
+                    : `接口返回成功，但未检测到 response.output_item.done。事件类型：${recentEventTypes}；content-type: ${
+                        responseContentType || 'unknown'
+                      }`
+                } else {
+                  taskFailureMessage =
+                    '接口返回成功，但未识别到图片数据。请检查 SSE 事件中是否包含 response.output_item.done。'
+                }
+                continue
+              }
+
+              aggregatedImages.push(...nextImages)
+              setImages([...aggregatedImages])
+              const summaryLine = outputText || `第 ${taskIndex + 1} 条任务生成成功。`
+              textualSummaries.push(
+                isBatchRun
+                  ? `[${taskIndex + 1}/${jobs.length}] ${summaryLine}`
+                  : summaryLine,
+              )
+              setResponseText(textualSummaries.slice(-8).join('\n\n'))
+
+              appendHistory({
+                id: crypto.randomUUID(),
+                createdAt: new Date().toISOString(),
+                provider: connection.provider,
+                model: candidateModel,
+                mode,
+                prompt: taskPrompt,
+                folder: historyFolderInput.trim(),
+                tags: historyTags,
+                endpoint: request.endpoint,
+                status: 'success',
+                statusCode: response.status,
+                latencyMs: lastAttemptLatencyMs,
+                images: getHistoryImages(nextImages),
+                imageCount: nextImages.length,
+                note: outputText || `模型返回图像成功（共 ${nextImages.length} 张）`,
+                responseSnippet: raw.slice(0, 1600),
+              })
+
+              setUsageStore((previous) =>
+                updateUsageStore(previous, connection.provider, nextImages.length, generation.quality),
+              )
+
+              if (candidateModel.toLowerCase() !== connection.model.trim().toLowerCase()) {
+                setConnection((previous) => ({
+                  ...previous,
+                  model: candidateModel,
+                }))
+              }
+
+              setQueueTasks((previous) =>
+                previous.map((item) =>
+                  item.id === job.id
+                    ? {
+                        ...item,
+                        status: 'success',
+                        finishedAt: performance.now(),
+                        latencyMs: lastAttemptLatencyMs,
+                        message: summaryLine,
+                      }
+                    : item,
+                ),
+              )
+
+              taskSucceeded = true
+              break
+            } catch (error) {
+              const reason = error instanceof Error ? error.message : '未知异常'
+              taskFailureMessage = reason
+              if (isLikelyFetchNetworkError(reason) || INPUT_STREAM_ERROR_PATTERN.test(reason)) {
+                continue
+              }
             }
-            taskFailureMessage =
-              mode === 'image-to-image' &&
-              Boolean(source.file) &&
-              INPUT_STREAM_ERROR_PATTERN.test(failure)
-                ? `图生图输入流异常：${failure}。已自动做上传图规范化，若仍失败请改用外链图片 URL 或更小的 JPG/PNG。`
-                : failure
+          }
+          if (taskSucceeded) {
             break
           }
-
-          let nextImages: StudioImage[] = []
-          let outputText = ''
-          let raw = ''
-          let streamEventTypes: string[] = []
-          let streamHasOutputItemDone = false
-
-          if (shouldParseSse) {
-            const streamResult = await parseResponseSseStream(response)
-            nextImages = streamResult.images
-            outputText = streamResult.outputText
-            raw = streamResult.raw
-            streamEventTypes = streamResult.eventTypes
-            streamHasOutputItemDone = streamResult.hasOutputItemDone
-            setRawResponse(raw || 'SSE 流式响应已消费，但无可展示原文。')
-          } else {
-            raw = await response.text()
-            const payload = safeJsonParse(raw)
-            setRawResponse(
-              typeof payload === 'string' ? payload : JSON.stringify(payload, null, 2),
-            )
-            nextImages = extractImages(payload)
-            outputText = extractText(payload)
-          }
-
-          if (nextImages.length === 0) {
-            if (shouldParseSse) {
-              const recentEventTypes =
-                streamEventTypes.length > 0
-                  ? streamEventTypes.slice(0, 10).join(', ')
-                  : '未解析到事件类型'
-              taskFailureMessage = streamHasOutputItemDone
-                ? `接口返回成功，检测到 response.output_item.done，但事件中未提取到可用图片数据（item.result 可能为空）。事件类型：${recentEventTypes}`
-                : `接口返回成功，但未检测到 response.output_item.done。事件类型：${recentEventTypes}；content-type: ${
-                    responseContentType || 'unknown'
-                  }`
-            } else {
-              taskFailureMessage =
-                '接口返回成功，但未识别到图片数据。请检查 SSE 事件中是否包含 response.output_item.done。'
-            }
-            break
-          }
-
-          aggregatedImages.push(...nextImages)
-          setImages([...aggregatedImages])
-          const summaryLine = outputText || `第 ${taskIndex + 1} 条任务生成成功。`
-          textualSummaries.push(
-            isBatchRun
-              ? `[${taskIndex + 1}/${promptQueue.length}] ${summaryLine}`
-              : summaryLine,
-          )
-          setResponseText(textualSummaries.slice(-6).join('\n\n'))
-
-          appendHistory({
-            id: crypto.randomUUID(),
-            createdAt: new Date().toISOString(),
-            provider: connection.provider,
-            model: candidateModel,
-            mode,
-            prompt: taskPrompt,
-            endpoint: request.endpoint,
-            status: 'success',
-            statusCode: response.status,
-            latencyMs: lastAttemptLatencyMs,
-            images: getHistoryImages(nextImages),
-            imageCount: nextImages.length,
-            note: outputText || `模型返回图像成功（共 ${nextImages.length} 张）`,
-            responseSnippet: raw.slice(0, 1600),
-          })
-
-          if (candidateModel.toLowerCase() !== connection.model.trim().toLowerCase()) {
-            setConnection((previous) => ({
-              ...previous,
-              model: candidateModel,
-            }))
-          }
-
-          taskSucceeded = true
-          break
         }
 
         if (!taskSucceeded) {
+          setQueueTasks((previous) =>
+            previous.map((item) =>
+              item.id === job.id
+                ? {
+                    ...item,
+                    status: 'error',
+                    finishedAt: performance.now(),
+                    message: taskFailureMessage || '执行失败',
+                    endpoint: taskFailureEndpoint,
+                  }
+                : item,
+            ),
+          )
           throw new Error(taskFailureMessage || `批量第 ${taskIndex + 1} 条生成失败`)
+        }
+
+        if (runtimeConfig.requestIntervalMs > 0 && taskIndex < jobs.length - 1) {
+          const effectiveInterval = Math.max(
+            0,
+            Math.floor(runtimeConfig.requestIntervalMs / Math.max(1, runtimeConfig.maxConcurrency)),
+          )
+          await sleep(effectiveInterval)
         }
       }
 
@@ -2014,7 +3030,7 @@ function App() {
       setRunState({
         phase: 'success',
         message: isBatchRun
-          ? `批量完成 ${promptQueue.length}/${promptQueue.length} · 累计 ${aggregatedImages.length} 张图`
+          ? `批量完成 ${jobs.length}/${jobs.length} · 累计 ${aggregatedImages.length} 张图`
           : `生成完成，获得 ${aggregatedImages.length} 张图`,
         endpoint: attemptedEndpoint,
         statusCode: lastStatusCode,
@@ -2023,7 +3039,7 @@ function App() {
 
       messageApi.success(
         isBatchRun
-          ? `批量生图完成（${promptQueue.length} 条任务）`
+          ? `批量生图完成（${jobs.length} 条任务）`
           : '生图完成',
       )
     } catch (error) {
@@ -2049,6 +3065,18 @@ function App() {
           ? `${textualSummaries.slice(-4).join('\n\n')}\n\n${readableMessage}`
           : readableMessage,
       )
+      setQueueTasks((previous) =>
+        previous.map((item) =>
+          item.status === 'pending' || item.status === 'running'
+            ? {
+                ...item,
+                status: 'error',
+                message: readableMessage,
+                finishedAt: performance.now(),
+              }
+            : item,
+        ),
+      )
 
       appendHistory({
         id: crypto.randomUUID(),
@@ -2057,6 +3085,8 @@ function App() {
         model: attemptedModel,
         mode,
         prompt: attemptedPrompt,
+        folder: historyFolderInput.trim(),
+        tags: historyTags,
         endpoint: attemptedEndpoint,
         status: 'error',
         images: [],
@@ -2071,6 +3101,38 @@ function App() {
       abortRef.current = null
     }
   }
+
+  hotkeyGenerateRef.current = handleGenerate
+  hotkeyCancelRef.current = handleCancel
+
+  useEffect(() => {
+    const handler = (event: KeyboardEvent) => {
+      const target = event.target as HTMLElement | null
+      const tagName = target?.tagName?.toLowerCase() ?? ''
+      const editable = tagName === 'input' || tagName === 'textarea' || target?.isContentEditable
+      if (event.ctrlKey && event.key === 'Enter') {
+        event.preventDefault()
+        void hotkeyGenerateRef.current()
+        return
+      }
+      if (event.key === 'Escape' && isGenerating) {
+        event.preventDefault()
+        hotkeyCancelRef.current()
+        return
+      }
+      if (editable) {
+        return
+      }
+      if (event.altKey && event.key === '1') {
+        setMode('text-to-image')
+      }
+      if (event.altKey && event.key === '2') {
+        setMode('image-to-image')
+      }
+    }
+    window.addEventListener('keydown', handler)
+    return () => window.removeEventListener('keydown', handler)
+  }, [isGenerating])
 
   const handleTestConnection = async () => {
     if (!connection.baseUrl.trim()) {
@@ -2282,6 +3344,8 @@ function App() {
       ...previous,
       prompt: record.prompt,
     }))
+    setHistoryFolderInput(record.folder ?? '')
+    setHistoryTagsInput((record.tags ?? []).join(','))
     setImages(record.images)
     setResponseText(record.note)
     setRawResponse(record.responseSnippet)
@@ -2301,9 +3365,12 @@ function App() {
         <Text className="field-label">
           批量胜场{context === 'image' ? '（图生图）' : ''}
         </Text>
-        <Tag color={batchQueuePreview.length > 0 ? 'gold' : 'default'}>
-          队列 {batchQueuePreview.length} 条
-        </Tag>
+        <Space size={6}>
+          <Tag color={batchQueuePreview.length > 0 ? 'gold' : 'default'}>
+            队列 {batchQueuePreview.length} 条
+          </Tag>
+          <Tag>并发 x{runtimeConfig.maxConcurrency}</Tag>
+        </Space>
       </div>
       <Segmented
         block
@@ -2619,6 +3686,15 @@ function App() {
               <Text type="secondary">尚未上传文件</Text>
             )}
           </div>
+          {uploadAnalysis ? (
+            <Text type="secondary">
+              预处理输入：{uploadAnalysis.mimeType} · {uploadAnalysis.sizeKb}KB
+              {typeof uploadAnalysis.width === 'number' && typeof uploadAnalysis.height === 'number'
+                ? ` · ${uploadAnalysis.width}x${uploadAnalysis.height}`
+                : ''}
+              （超大图会自动压缩与规整）
+            </Text>
+          ) : null}
 
           {source.previewUrl ? (
             <div className="source-preview">
@@ -2711,7 +3787,16 @@ function App() {
         </div>
       </header>
 
-      <div className="layout-grid">
+      <div
+        className={layoutCompact ? 'layout-grid layout-grid-compact' : 'layout-grid'}
+        style={
+          layoutCompact
+            ? undefined
+            : {
+                gridTemplateColumns: `minmax(320px, ${leftPanePercent / 100}fr) minmax(560px, ${(100 - leftPanePercent) / 100}fr)`,
+              }
+        }
+      >
         <div className="left-column">
           <Card
             className="studio-card compact-card"
@@ -2727,8 +3812,12 @@ function App() {
                 onClick={() => {
                   setConnection(DEFAULT_CONNECTION)
                   setGeneration(DEFAULT_GENERATION)
+                  setBatchConfig(DEFAULT_BATCH)
                   setSource({ file: null, previewUrl: '', imageUrl: '' })
+                  setMaskEditor(DEFAULT_MASK_EDITOR)
+                  setUploadAnalysis(null)
                   setImages([])
+                  setQueueTasks([])
                   setRunState(INITIAL_RUN_STATE)
                   setRequestPreview('')
                   setResponseText('')
@@ -2930,6 +4019,81 @@ function App() {
               </div>
             </div>
 
+            <Divider />
+
+            <div className="field-grid">
+              <div className="field-block">
+                <Text className="field-label">布局压缩模式</Text>
+                <Checkbox
+                  checked={layoutCompact}
+                  onChange={(event) => setLayoutCompact(event.target.checked)}
+                >
+                  紧凑布局（配置区折叠感）
+                </Checkbox>
+              </div>
+              <div className="field-block">
+                <Text className="field-label">左右分栏比例</Text>
+                <Slider
+                  min={30}
+                  max={65}
+                  value={leftPanePercent}
+                  onChange={(value) => setLeftPanePercent(Number(value))}
+                />
+              </div>
+              <div className="field-block">
+                <Text className="field-label">历史归档文件夹</Text>
+                <Input
+                  value={historyFolderInput}
+                  onChange={(event) => setHistoryFolderInput(event.target.value)}
+                  placeholder="例如：海报项目 / 角色设定"
+                />
+              </div>
+              <div className="field-block">
+                <Text className="field-label">历史标签</Text>
+                <Input
+                  value={historyTagsInput}
+                  onChange={(event) => setHistoryTagsInput(event.target.value)}
+                  placeholder="商业, 赛博, 人像"
+                />
+              </div>
+            </div>
+
+            <Divider />
+
+            <div className="workspace-hub">
+              <Text className="field-label">协作空间（多账号/多项目档案）</Text>
+              <Space wrap>
+                <Input
+                  value={workspaceNameInput}
+                  onChange={(event) => setWorkspaceNameInput(event.target.value)}
+                  placeholder="空间名"
+                  style={{ width: 180 }}
+                />
+                <Button size="small" onClick={saveWorkspaceProfile}>
+                  保存当前空间
+                </Button>
+                <Button size="small" onClick={exportReadonlyShareLink}>
+                  复制只读分享链接
+                </Button>
+              </Space>
+              <Space wrap size={8}>
+                {workspaceProfiles.length === 0 ? (
+                  <Text type="secondary">暂无空间快照</Text>
+                ) : (
+                  workspaceProfiles.map((profile) => (
+                    <Space key={profile.id} size={4}>
+                      <Button size="small" onClick={() => applyWorkspaceProfile(profile.id)}>
+                        {profile.name}
+                      </Button>
+                      <Button size="small" danger onClick={() => deleteWorkspaceProfile(profile.id)}>
+                        删
+                      </Button>
+                    </Space>
+                  ))
+                )}
+              </Space>
+            </div>
+
             <div className="actions-row">
               <Button
                 icon={isTesting ? <ClockCircleOutlined /> : <ApiOutlined />}
@@ -3116,6 +4280,272 @@ function App() {
                 />
               </div>
             </div>
+
+            <Divider />
+
+            <div className="preset-manager">
+              <div className="preset-manager-head">
+                <Text className="field-label">参数预设</Text>
+                <Space>
+                  <Button size="small" onClick={saveCurrentPreset}>
+                    保存当前为预设
+                  </Button>
+                </Space>
+              </div>
+              <Space wrap size={8}>
+                {presets.length === 0 ? (
+                  <Text type="secondary">暂无预设，可先保存一套常用参数。</Text>
+                ) : (
+                  presets.map((preset) => (
+                    <Space key={preset.id} size={4}>
+                      <Button size="small" onClick={() => applyPreset(preset.id)}>
+                        {preset.name}
+                      </Button>
+                      <Button size="small" danger onClick={() => removePreset(preset.id)}>
+                        删
+                      </Button>
+                    </Space>
+                  ))
+                )}
+              </Space>
+            </div>
+
+            <Divider />
+
+            <div className="field-grid generation-grid">
+              <div className="field-block">
+                <Text className="field-label">并发通道（批量）</Text>
+                <InputNumber
+                  min={1}
+                  max={5}
+                  value={runtimeConfig.maxConcurrency}
+                  onChange={(value) =>
+                    setRuntimeConfig((previous) => ({
+                      ...previous,
+                      maxConcurrency: Math.max(1, Math.min(5, Math.floor(Number(value ?? 1)))),
+                    }))
+                  }
+                  style={{ width: '100%' }}
+                />
+              </div>
+              <div className="field-block">
+                <Text className="field-label">请求间隔 ms</Text>
+                <InputNumber
+                  min={0}
+                  max={5000}
+                  step={100}
+                  value={runtimeConfig.requestIntervalMs}
+                  onChange={(value) =>
+                    setRuntimeConfig((previous) => ({
+                      ...previous,
+                      requestIntervalMs: Math.max(0, Math.floor(Number(value ?? 0))),
+                    }))
+                  }
+                  style={{ width: '100%' }}
+                />
+              </div>
+              <div className="field-block">
+                <Text className="field-label">今日配额（张）</Text>
+                <InputNumber
+                  min={1}
+                  max={10000}
+                  value={runtimeConfig.dailyImageQuota}
+                  onChange={(value) =>
+                    setRuntimeConfig((previous) => ({
+                      ...previous,
+                      dailyImageQuota: Math.max(1, Math.floor(Number(value ?? 1))),
+                    }))
+                  }
+                  style={{ width: '100%' }}
+                />
+              </div>
+              <div className="field-block">
+                <Text className="field-label">今日预算（USD）</Text>
+                <InputNumber
+                  min={1}
+                  max={2000}
+                  step={0.5}
+                  value={runtimeConfig.dailyBudgetUsd}
+                  onChange={(value) =>
+                    setRuntimeConfig((previous) => ({
+                      ...previous,
+                      dailyBudgetUsd: Math.max(1, Number(value ?? 1)),
+                    }))
+                  }
+                  style={{ width: '100%' }}
+                />
+              </div>
+
+              <div className="field-block full-width">
+                <Text className="field-label">备用 Base URL（每行一个）</Text>
+                <Input.TextArea
+                  value={runtimeConfig.fallbackBaseUrls}
+                  onChange={(event) =>
+                    setRuntimeConfig((previous) => ({
+                      ...previous,
+                      fallbackBaseUrls: event.target.value,
+                    }))
+                  }
+                  autoSize={{ minRows: 2, maxRows: 5 }}
+                  placeholder="https://api.asxs.top/v1"
+                />
+              </div>
+
+              <div className="field-block">
+                <Text className="field-label">质量守门</Text>
+                <Checkbox
+                  checked={runtimeConfig.qualityGuardEnabled}
+                  onChange={(event) =>
+                    setRuntimeConfig((previous) => ({
+                      ...previous,
+                      qualityGuardEnabled: event.target.checked,
+                    }))
+                  }
+                >
+                  启用提示词质量检查
+                </Checkbox>
+              </div>
+              <div className="field-block">
+                <Text className="field-label">最短提示词长度</Text>
+                <InputNumber
+                  min={1}
+                  max={120}
+                  value={runtimeConfig.minPromptLength}
+                  onChange={(value) =>
+                    setRuntimeConfig((previous) => ({
+                      ...previous,
+                      minPromptLength: Math.max(1, Math.floor(Number(value ?? 1))),
+                    }))
+                  }
+                  style={{ width: '100%' }}
+                />
+              </div>
+              <div className="field-block full-width">
+                <Text className="field-label">敏感词（逗号分隔）</Text>
+                <Input
+                  value={runtimeConfig.blockedWords}
+                  onChange={(event) =>
+                    setRuntimeConfig((previous) => ({
+                      ...previous,
+                      blockedWords: event.target.value,
+                    }))
+                  }
+                />
+              </div>
+
+              <div className="field-block">
+                <Text className="field-label">Seed 实验模式</Text>
+                <Checkbox
+                  checked={runtimeConfig.enableSeedExperiment}
+                  onChange={(event) =>
+                    setRuntimeConfig((previous) => ({
+                      ...previous,
+                      enableSeedExperiment: event.target.checked,
+                    }))
+                  }
+                >
+                  同提示词双 seed 对照
+                </Checkbox>
+              </div>
+              <div className="field-block">
+                <Text className="field-label">Seed 偏移量</Text>
+                <InputNumber
+                  min={1}
+                  max={100000}
+                  value={runtimeConfig.seedDelta}
+                  onChange={(value) =>
+                    setRuntimeConfig((previous) => ({
+                      ...previous,
+                      seedDelta: Math.max(1, Math.floor(Number(value ?? 1))),
+                    }))
+                  }
+                  style={{ width: '100%' }}
+                />
+              </div>
+
+              <div className="field-block full-width">
+                <Text className="field-label">批量导入（TXT / CSV / JSON）</Text>
+                <Input.TextArea
+                  value={importPromptText}
+                  onChange={(event) => setImportPromptText(event.target.value)}
+                  autoSize={{ minRows: 3, maxRows: 7 }}
+                  placeholder='["提示词A","提示词B"] 或 每行一条'
+                />
+                <Space>
+                  <label className="upload-button compact-upload">
+                    导入文件
+                    <input
+                      type="file"
+                      accept=".txt,.csv,.json"
+                      onChange={(event) => {
+                        const file = event.target.files?.[0]
+                        if (!file) {
+                          return
+                        }
+                        void file
+                          .text()
+                          .then((text) => {
+                            setImportPromptText(text)
+                            messageApi.success(`已载入文件：${file.name}`)
+                          })
+                          .catch(() => messageApi.error('文件读取失败'))
+                      }}
+                    />
+                  </label>
+                  <Button size="small" onClick={importPromptLines}>
+                    解析并写入批量队列
+                  </Button>
+                  <Button
+                    size="small"
+                    onClick={() => {
+                      setImportPromptText('')
+                    }}
+                  >
+                    清空
+                  </Button>
+                </Space>
+              </div>
+
+              <div className="field-block full-width">
+                <Text className="field-label">图生图局部重绘（蒙版策略）</Text>
+                <Space wrap>
+                  <Checkbox
+                    checked={maskEditor.enabled}
+                    onChange={(event) =>
+                      setMaskEditor((previous) => ({
+                        ...previous,
+                        enabled: event.target.checked,
+                      }))
+                    }
+                  >
+                    启用局部重绘
+                  </Checkbox>
+                  <Segmented
+                    value={maskEditor.protectMode}
+                    options={[
+                      { label: '保留中心', value: 'keep-center' },
+                      { label: '重绘中心', value: 'edit-center' },
+                    ]}
+                    onChange={(value) =>
+                      setMaskEditor((previous) => ({
+                        ...previous,
+                        protectMode: value === 'edit-center' ? 'edit-center' : 'keep-center',
+                      }))
+                    }
+                  />
+                </Space>
+                <Input
+                  value={maskEditor.maskNote}
+                  onChange={(event) =>
+                    setMaskEditor((previous) => ({
+                      ...previous,
+                      maskNote: event.target.value,
+                    }))
+                  }
+                  placeholder="备注保护区域，例如：保留主体脸部，重绘背景。"
+                />
+              </div>
+            </div>
           </Card>
         </div>
 
@@ -3167,6 +4597,98 @@ function App() {
           </Card>
 
           <Card
+            className="studio-card"
+            title={
+              <Space>
+                <ClockCircleOutlined />
+                任务队列
+              </Space>
+            }
+          >
+            {queueTasks.length === 0 ? (
+              <Empty
+                description="暂无队列任务，发起批量任务后将在这里看到进度。"
+                image={Empty.PRESENTED_IMAGE_SIMPLE}
+              />
+            ) : (
+              <div className="queue-list">
+                {queueTasks.map((task, index) => (
+                  <div key={task.id} className={`queue-item queue-${task.status}`}>
+                    <div className="queue-item-head">
+                      <Text strong>
+                        #{index + 1} {task.status === 'success' ? '已完成' : task.status === 'error' ? '失败' : task.status === 'running' ? '执行中' : '排队中'}
+                      </Text>
+                      <Space size={6}>
+                        {task.model ? <Tag>{task.model}</Tag> : null}
+                        {typeof task.latencyMs === 'number' ? <Tag>{task.latencyMs} ms</Tag> : null}
+                      </Space>
+                    </div>
+                    <Paragraph ellipsis={{ rows: 1 }} className="queue-prompt">
+                      {task.prompt}
+                    </Paragraph>
+                    {task.message ? (
+                      <Text type={task.status === 'error' ? 'danger' : 'secondary'}>{task.message}</Text>
+                    ) : null}
+                  </div>
+                ))}
+              </div>
+            )}
+          </Card>
+
+          <Card
+            className="studio-card"
+            title={
+              <Space>
+                <ApiOutlined />
+                成本与健康
+              </Space>
+            }
+          >
+            <div className="cost-health-grid">
+              <div className="metric-tile">
+                <Text type="secondary">今日请求</Text>
+                <Title level={4}>{todayUsage.requests}</Title>
+              </div>
+              <div className="metric-tile">
+                <Text type="secondary">今日出图</Text>
+                <Title level={4}>{todayUsage.images}</Title>
+              </div>
+              <div className="metric-tile">
+                <Text type="secondary">今日估算成本</Text>
+                <Title level={4}>${todayUsage.estimatedCostUsd.toFixed(2)}</Title>
+              </div>
+              <div className="metric-tile">
+                <Text type="secondary">24h 成功率</Text>
+                <Title level={4}>{historyHealth.successRate}%</Title>
+              </div>
+            </div>
+            <div className="quota-bars">
+              <Text type="secondary">
+                图片配额 {todayUsage.images}/{runtimeConfig.dailyImageQuota}
+              </Text>
+              <Progress
+                percent={Math.min(100, Math.round((todayUsage.images / runtimeConfig.dailyImageQuota) * 100))}
+                showInfo={false}
+                strokeColor="#39a08f"
+              />
+              <Text type="secondary">
+                预算额度 ${todayUsage.estimatedCostUsd.toFixed(2)}/${runtimeConfig.dailyBudgetUsd.toFixed(2)}
+              </Text>
+              <Progress
+                percent={Math.min(
+                  100,
+                  Math.round((todayUsage.estimatedCostUsd / runtimeConfig.dailyBudgetUsd) * 100),
+                )}
+                showInfo={false}
+                strokeColor="#4f86d9"
+              />
+              <Text type="secondary">
+                平均延迟 {historyHealth.avgLatencyMs}ms，24h 错误数 {historyHealth.errors24h}
+              </Text>
+            </div>
+          </Card>
+
+          <Card
             className="studio-card gallery-card"
             title={
               <Space>
@@ -3177,10 +4699,21 @@ function App() {
             extra={
               <Space>
                 <Button
+                  onClick={() => setShowOnlyKeptImages((previous) => !previous)}
+                >
+                  {showOnlyKeptImages ? '显示全部' : '仅看保留'}
+                </Button>
+                <Button onClick={() => void exportProjectZip()}>
+                  导出项目 ZIP
+                </Button>
+                <Button
                   icon={<ReloadOutlined />}
                   onClick={() => {
                     setImages([])
                     setPreviewImage(null)
+                    setImageReviews({})
+                    setQueueTasks([])
+                    setSseEvents([])
                     setResponseText('')
                     setRawResponse('')
                     setRequestPreview('')
@@ -3204,10 +4737,16 @@ function App() {
                 image={Empty.PRESENTED_IMAGE_SIMPLE}
               />
             ) : null}
+            {!isGenerating && images.length > 0 && visibleImages.length === 0 ? (
+              <Empty
+                description="当前过滤条件下没有图片（可切换为显示全部）。"
+                image={Empty.PRESENTED_IMAGE_SIMPLE}
+              />
+            ) : null}
 
-            {images.length > 0 ? (
+            {visibleImages.length > 0 ? (
               <div className="image-grid">
-                {images.map((image) => (
+                {visibleImages.map((image) => (
                   <article
                     key={image.id}
                     className="image-card"
@@ -3246,6 +4785,47 @@ function App() {
                           }}
                         />
                       </Tooltip>
+                    </div>
+                    <div className="image-review-bar">
+                      <div onClick={(event) => event.stopPropagation()}>
+                        <Rate
+                          allowClear
+                          value={imageReviews[image.src]?.rating ?? 0}
+                          onChange={(value) => updateImageReview(image, { rating: value })}
+                        />
+                      </div>
+                      <Space size={6}>
+                        <Button
+                          size="small"
+                          type={imageReviews[image.src]?.decision === 'keep' ? 'primary' : 'default'}
+                          onClick={(event) => {
+                            event.stopPropagation()
+                            updateImageReview(image, {
+                              decision:
+                                imageReviews[image.src]?.decision === 'keep'
+                                  ? 'unrated'
+                                  : 'keep',
+                            })
+                          }}
+                        >
+                          保留
+                        </Button>
+                        <Button
+                          size="small"
+                          danger={imageReviews[image.src]?.decision === 'discard'}
+                          onClick={(event) => {
+                            event.stopPropagation()
+                            updateImageReview(image, {
+                              decision:
+                                imageReviews[image.src]?.decision === 'discard'
+                                  ? 'unrated'
+                                  : 'discard',
+                            })
+                          }}
+                        >
+                          淘汰
+                        </Button>
+                      </Space>
                     </div>
                   </article>
                 ))}
@@ -3289,6 +4869,21 @@ function App() {
             {previewImage ? (
               <div className="image-preview-stage">
                 <img src={previewImage.src} alt="预览大图" />
+                <div className="image-preview-review">
+                  <Text type="secondary">评分与备注（用于抽卡筛选）</Text>
+                  <Rate
+                    allowClear
+                    value={imageReviews[previewImage.src]?.rating ?? 0}
+                    onChange={(value) => updateImageReview(previewImage, { rating: value })}
+                  />
+                  <Input
+                    value={imageReviews[previewImage.src]?.note ?? ''}
+                    onChange={(event) =>
+                      updateImageReview(previewImage, { note: event.target.value })
+                    }
+                    placeholder="记录这张图的优缺点，便于后续迭代。"
+                  />
+                </div>
               </div>
             ) : null}
           </Modal>
@@ -3343,7 +4938,32 @@ function App() {
                     />
                   ),
                 },
+                {
+                  key: 'sse',
+                  label: 'SSE 时间线',
+                  children: sseEvents.length === 0 ? (
+                    <Empty
+                      description="暂无 SSE 事件。发起 Responses 流式任务后会自动记录。"
+                      image={Empty.PRESENTED_IMAGE_SIMPLE}
+                    />
+                  ) : (
+                    <div className="sse-timeline">
+                      {sseEvents.slice(-120).map((event, index) => (
+                        <div key={`${event.at}-${index}`} className="sse-item">
+                          <Text type="secondary">{new Date(event.at).toLocaleTimeString()}</Text>
+                          <Tag>{event.type}</Tag>
+                          <Paragraph ellipsis={{ rows: 2 }}>{event.preview}</Paragraph>
+                        </div>
+                      ))}
+                    </div>
+                  ),
+                },
               ]}
+            />
+            <Alert
+              type="info"
+              showIcon
+              message="快捷键：Ctrl+Enter 生成，Esc 取消，Alt+1/2 切换文生图/图生图。"
             />
           </Card>
 
@@ -3356,16 +4976,100 @@ function App() {
               </Space>
             }
             extra={
-              <Button onClick={() => setHistory([])} danger>
-                清空历史
-              </Button>
+              <Space>
+                <Button onClick={deleteSelectedHistory} danger>
+                  删除选中
+                </Button>
+                <Button onClick={clearHistorySelection}>清空选择</Button>
+                <Button onClick={() => setHistory([])} danger>
+                  清空历史
+                </Button>
+              </Space>
             }
           >
-            {history.length === 0 ? (
+            <div className="history-filters">
+              <Input
+                allowClear
+                value={historyFilter.keyword}
+                onChange={(event) =>
+                  setHistoryFilter((previous) => ({
+                    ...previous,
+                    keyword: event.target.value,
+                  }))
+                }
+                placeholder="关键词筛选（提示词/模型/备注/标签）"
+              />
+              <Space wrap>
+                <Segmented
+                  value={historyFilter.status}
+                  options={[
+                    { label: '全部', value: 'all' },
+                    { label: '成功', value: 'success' },
+                    { label: '失败', value: 'error' },
+                  ]}
+                  onChange={(value) =>
+                    setHistoryFilter((previous) => ({
+                      ...previous,
+                      status: value === 'success' || value === 'error' ? value : 'all',
+                    }))
+                  }
+                />
+                <Segmented
+                  value={historyFilter.mode}
+                  options={[
+                    { label: '全模式', value: 'all' },
+                    { label: '文生图', value: 'text-to-image' },
+                    { label: '图生图', value: 'image-to-image' },
+                  ]}
+                  onChange={(value) =>
+                    setHistoryFilter((previous) => ({
+                      ...previous,
+                      mode:
+                        value === 'text-to-image' || value === 'image-to-image'
+                          ? value
+                          : 'all',
+                    }))
+                  }
+                />
+                <Input
+                  value={historyFilter.folder}
+                  onChange={(event) =>
+                    setHistoryFilter((previous) => ({
+                      ...previous,
+                      folder: event.target.value,
+                    }))
+                  }
+                  placeholder="文件夹筛选"
+                  style={{ width: 140 }}
+                />
+                <Input
+                  type="date"
+                  value={historyFilter.fromDate}
+                  onChange={(event) =>
+                    setHistoryFilter((previous) => ({
+                      ...previous,
+                      fromDate: event.target.value,
+                    }))
+                  }
+                />
+                <Input
+                  type="date"
+                  value={historyFilter.toDate}
+                  onChange={(event) =>
+                    setHistoryFilter((previous) => ({
+                      ...previous,
+                      toDate: event.target.value,
+                    }))
+                  }
+                />
+              </Space>
+            </div>
+
+            {filteredHistory.length === 0 ? (
               <Empty description="暂无历史记录" image={Empty.PRESENTED_IMAGE_SIMPLE} />
             ) : (
               <div className="history-list">
-                {history.map((item) => (
+                {filteredHistory.map((item) => (
                   <button
                     key={item.id}
                     type="button"
@@ -3374,11 +5078,29 @@ function App() {
                   >
                     <div className="history-header">
                       <Space size={6}>
+                        <Checkbox
+                          checked={historySelection.includes(item.id)}
+                          onChange={(event) => {
+                            event.stopPropagation()
+                            setHistorySelection((previous) =>
+                              event.target.checked
+                                ? previous.includes(item.id)
+                                  ? previous
+                                  : [...previous, item.id]
+                                : previous.filter((id) => id !== item.id),
+                            )
+                          }}
+                          onClick={(event) => event.stopPropagation()}
+                        />
                         <Tag color={item.status === 'success' ? 'green' : 'red'}>
                           {item.status === 'success' ? '成功' : '失败'}
                         </Tag>
                         <Tag>{item.mode === 'text-to-image' ? '文生图' : '图生图'}</Tag>
                         <Tag>{item.provider === 'openai' ? 'ChatGPT' : 'Gemini'}</Tag>
+                        {item.folder ? <Tag color="blue">{item.folder}</Tag> : null}
+                        {(item.tags ?? []).map((tag) => (
+                          <Tag key={`${item.id}-${tag}`}>{tag}</Tag>
+                        ))}
                       </Space>
                       <Text type="secondary">
                         {new Date(item.createdAt).toLocaleString()}

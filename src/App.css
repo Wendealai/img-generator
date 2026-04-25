@@ -184,6 +184,10 @@
   gap: 14px;
 }
 
+.layout-grid.layout-grid-compact {
+  grid-template-columns: minmax(0, 1fr);
+}
+
 .left-column,
 .right-column {
   display: flex;
@@ -451,6 +455,25 @@
   gap: 8px;
 }
 
+.preset-manager {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.preset-manager-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.workspace-hub {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
 .preset-chip {
   border-radius: 999px !important;
   border: 1px solid rgba(126, 175, 209, 0.7) !important;
@@ -504,6 +527,12 @@
   display: none;
 }
 
+.upload-button.compact-upload {
+  padding: 4px 10px;
+  border-style: solid;
+  font-size: 12px;
+}
+
 .source-preview {
   border-radius: 14px;
   border: 1px solid rgba(130, 175, 207, 0.54);
@@ -516,6 +545,73 @@
   width: 100%;
   max-height: 250px;
   object-fit: contain;
+}
+
+.queue-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  max-height: 260px;
+  overflow: auto;
+}
+
+.queue-item {
+  border-radius: 10px;
+  border: 1px solid rgba(136, 178, 207, 0.46);
+  background: rgba(255, 255, 255, 0.9);
+  padding: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.queue-item.queue-running {
+  border-color: rgba(80, 161, 209, 0.62);
+}
+
+.queue-item.queue-success {
+  border-color: rgba(66, 179, 142, 0.56);
+}
+
+.queue-item.queue-error {
+  border-color: rgba(223, 118, 118, 0.52);
+}
+
+.queue-item-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 10px;
+}
+
+.queue-prompt.ant-typography {
+  margin: 0;
+  color: #2f5475;
+}
+
+.cost-health-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.metric-tile {
+  border-radius: 10px;
+  border: 1px solid rgba(131, 173, 203, 0.5);
+  background: rgba(255, 255, 255, 0.88);
+  padding: 10px;
+}
+
+.metric-tile h4.ant-typography {
+  margin: 4px 0 0;
+  color: #1f4769;
+}
+
+.quota-bars {
+  margin-top: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
 }
 
 .status-meta {
@@ -633,6 +729,21 @@
   border-color: rgba(27, 154, 145, 0.82);
 }
 
+.image-review-bar {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.image-preview-review {
+  margin-top: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
 .history-list {
   display: flex;
   flex-direction: column;
@@ -688,6 +799,13 @@
   gap: 10px;
 }
 
+.history-filters {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+
 .mono-area textarea.ant-input {
   font-family: 'IBM Plex Mono', 'Consolas', 'Liberation Mono', monospace;
   font-size: 12px;
@@ -698,6 +816,25 @@
 
 .output-main-area textarea.ant-input {
   min-height: 240px;
+}
+
+.sse-timeline {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  max-height: 360px;
+  overflow: auto;
+}
+
+.sse-item {
+  border-radius: 10px;
+  border: 1px solid rgba(132, 177, 208, 0.45);
+  background: rgba(250, 254, 255, 0.95);
+  padding: 8px 10px;
+}
+
+.sse-item .ant-typography {
+  margin: 2px 0 0;
 }
 
 .model-input-box {
@@ -802,6 +939,10 @@
   .template-grid {
     grid-template-columns: 1fr;
   }
+
+  .cost-health-grid {
+    grid-template-columns: 1fr;
+  }
 }
 
 @media (max-width: 780px) {
@@ -837,6 +978,16 @@
 
   .template-item-actions {
     width: 100%;
+  }
+
+  .image-review-bar {
+    flex-direction: column;
+    align-items: flex-start;
+  }
+
+  .queue-item-head {
+    flex-direction: column;
+    align-items: flex-start;
   }
 
 }
