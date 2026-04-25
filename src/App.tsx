@@ -564,7 +564,7 @@ const DEFAULT_N8N_POLL_INTERVAL_MS = 1800
 const DEFAULT_N8N_POLL_TIMEOUT_MS = 120000
 
 const DEFAULT_CONNECTION: ConnectionConfig = {
-  backendMode: 'direct',
+  backendMode: 'n8n',
   provider: 'openai',
   authMode: 'bearer',
   baseUrl: DEFAULT_OPENAI_BASE_URL,
@@ -825,6 +825,36 @@ function normalizeConnectionDefaults(connection: ConnectionConfig): ConnectionCo
   const normalizedModelsPath = connection.modelsPath.trim()
   const normalizedOpenaiTextPath = connection.openaiTextPath.trim()
   const normalizedOpenaiEditPath = connection.openaiEditPath.trim()
+  const normalizedApiKey = connection.apiKey.trim()
+  const normalizedExtraHeaders = connection.extraHeaders.trim()
+  const normalizedModel = connection.model.trim()
+
+  const shouldMigrateOldDefaultDirectToN8n =
+    connection.backendMode === 'direct' &&
+    connection.provider === 'openai' &&
+    connection.authMode === 'bearer' &&
+    !normalizedApiKey &&
+    !normalizedExtraHeaders &&
+    normalizedBase === DEFAULT_OPENAI_BASE_URL &&
+    normalizedModelsPath === '/models' &&
+    normalizedOpenaiTextPath === '/responses' &&
+    normalizedOpenaiEditPath === '/responses'
+
+  if (shouldMigrateOldDefaultDirectToN8n) {
+    return {
+      ...DEFAULT_CONNECTION,
+      provider: connection.provider,
+      model: normalizedModel || DEFAULT_CONNECTION.model,
+      n8nBaseUrl: connection.n8nBaseUrl.trim() || DEFAULT_N8N_BASE_URL,
+      n8nPromptOptimizePath: normalizeWebhookPath(
+        connection.n8nPromptOptimizePath,
+        DEFAULT_N8N_PROMPT_OPTIMIZE_PATH,
+      ),
+      n8nGeneratePath: normalizeWebhookPath(connection.n8nGeneratePath, DEFAULT_N8N_GENERATE_PATH),
+      n8nStatusPath: normalizeWebhookPath(connection.n8nStatusPath, DEFAULT_N8N_STATUS_PATH),
+      n8nAuthToken: connection.n8nAuthToken,
+    }
+  }
 
   const isLegacyBuiltInDefault =
     connection.provider === 'openai' &&
