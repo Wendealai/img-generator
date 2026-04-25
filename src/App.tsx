@@ -47,7 +47,10 @@ type StudioMode = 'text-to-image' | 'image-to-image'
 type RunPhase = 'idle' | 'testing' | 'running' | 'success' | 'error'
 type BatchMode = 'single' | 'prompt-list' | 'reroll'
 type PromptTemplateScope = 'all' | 'favorites' | 'recent'
-type QueueTaskStatus = 'pending' | 'running' | 'success' | 'error'
+type QueueTaskStatus = 'pending' | 'running' | 'success' | 'error' | 'cancelled'
+type QueueTaskPriority = 'high' | 'normal' | 'low'
+type RetryProfile = 'conservative' | 'balanced' | 'aggressive'
+type ErrorCategory = 'network' | 'auth' | 'quota' | 'server' | 'sse' | 'model' | 'client' | 'unknown'
 type ImageDecision = 'keep' | 'discard' | 'unrated'
 
 interface ConnectionConfig {
@@ -156,11 +159,15 @@ interface QueueTask {
   id: string
   prompt: string
   status: QueueTaskStatus
+  priority: QueueTaskPriority
   model: string
   endpoint: string
   startedAt?: number
   finishedAt?: number
   latencyMs?: number
+  attempts?: number
+  retryCount?: number
+  lastErrorCategory?: ErrorCategory
   message?: string
 }
 
@@ -188,7 +195,11 @@ interface GenerateRuntimeConfig {
   seedDelta: number
   dependencyChainEnabled: boolean
   maxRetries: number
+  retryProfile: RetryProfile
   retryBackoffMs: number
+  circuitBreakerEnabled: boolean
+  circuitBreakerFailureThreshold: number
+  circuitBreakerCooldownSec: number
   endpointProbeEnabled: boolean
   endpointProbeIntervalSec: number
   autoSelectBestEndpoint: boolean
@@ -208,6 +219,16 @@ interface EndpointHealth {
   latencyMs: number
   statusCode: number
   checkedAt: string
+}
+
+interface EndpointCircuitState {
+  url: string
+  failures: number
+  trips: number
+  openedUntil: number
+  lastStatusCode?: number
+  lastError?: string
+  updatedAt: string
 }
 
 interface ImageMetadata {
@@ -238,6 +259,18 @@ interface AuditLogEntry {
   at: string
   action: string
   detail: string
+}
+
+interface ErrorDiagnostic {
+  id: string
+  at: string
+  category: ErrorCategory
+  summary: string
+  suggestion: string
+  endpoint: string
+  model: string
+  statusCode?: number
+  retryable: boolean
 }
 
 interface HistoryFilter {
@@ -280,6 +313,7 @@ interface StreamEventTrace {
   at: string
   type: string
   preview: string
+  raw?: string
 }
 
 const { Title, Paragraph, Text } = Typography
@@ -538,7 +572,11 @@ const DEFAULT_RUNTIME_CONFIG: GenerateRuntimeConfig = {
   seedDelta: 77,
   dependencyChainEnabled: false,
   maxRetries: 1,
+  retryProfile: 'balanced',
   retryBackoffMs: 800,
+  circuitBreakerEnabled: true,
+  circuitBreakerFailureThreshold: 3,
+  circuitBreakerCooldownSec: 60,
   endpointProbeEnabled: true,
   endpointProbeIntervalSec: 30,
   autoSelectBestEndpoint: true,
@@ -1014,6 +1052,129 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => {
     window.setTimeout(resolve, ms)
   })
+}
+
+const QUEUE_PRIORITY_WEIGHT: Record<QueueTaskPriority, number> = {
+  high: 3,
+  normal: 2,
+  low: 1,
+}
+
+type FailureClassification = {
+  category: ErrorCategory
+  retryable: boolean
+  suggestion: string
+}
+
+function classifyFailure(statusCode: number | undefined, message: string): FailureClassification {
+  const normalizedMessage = message.toLowerCase()
+  if (
+    isLikelyFetchNetworkError(normalizedMessage) ||
+    /network error|timeout|timed out|econn|socket|dns|cors|failed to fetch/i.test(message)
+  ) {
+    return {
+      category: 'network',
+      retryable: true,
+      suggestion: '检查网络与代理，优先使用同域 /api-asxs 代理，再重试。',
+    }
+  }
+
+  if (statusCode === 401 || statusCode === 403 || /unauthorized|forbidden|invalid api key/i.test(message)) {
+    return {
+      category: 'auth',
+      retryable: false,
+      suggestion: '检查 API Key、鉴权模式与权限范围。',
+    }
+  }
+
+  if (statusCode === 429 || /rate limit|quota|too many requests/i.test(message)) {
+    return {
+      category: 'quota',
+      retryable: true,
+      suggestion: '触发限流/额度，请降低并发或稍后重试。',
+    }
+  }
+
+  if (statusCode !== undefined && statusCode >= 500) {
+    return {
+      category: 'server',
+      retryable: true,
+      suggestion: '上游服务异常，建议自动切换备用线路并重试。',
+    }
+  }
+
+  if (/response\.output_item\.done|sse|event-stream|input stream/i.test(message)) {
+    return {
+      category: 'sse',
+      retryable: true,
+      suggestion: '检查流式事件结构与 item.result，必要时切到备用 endpoint。',
+    }
+  }
+
+  if (MODEL_UNAVAILABLE_PATTERN.test(message)) {
+    return {
+      category: 'model',
+      retryable: true,
+      suggestion: '当前模型通道不足，切换同能力模型或备用网关。',
+    }
+  }
+
+  if (statusCode !== undefined && statusCode >= 400) {
+    return {
+      category: 'client',
+      retryable: false,
+      suggestion: '请求参数可能有误，请检查 path、model、prompt 和输入图规格。',
+    }
+  }
+
+  return {
+    category: 'unknown',
+    retryable: false,
+    suggestion: '查看原始响应和 SSE 时间线，定位具体错误来源。',
+  }
+}
+
+function shouldRetryByProfile(
+  statusCode: number | undefined,
+  message: string,
+  attempt: number,
+  maxRetries: number,
+  profile: RetryProfile,
+): boolean {
+  if (attempt >= maxRetries) {
+    return false
+  }
+
+  const classified = classifyFailure(statusCode, message)
+  if (!classified.retryable) {
+    return false
+  }
+
+  if (profile === 'aggressive') {
+    return true
+  }
+  if (profile === 'conservative') {
+    return (
+      classified.category === 'network' ||
+      classified.category === 'server' ||
+      classified.category === 'quota'
+    )
+  }
+  return (
+    classified.category === 'network' ||
+    classified.category === 'server' ||
+    classified.category === 'quota' ||
+    classified.category === 'model' ||
+    classified.category === 'sse'
+  )
+}
+
+function computeRetryDelayMs(backoffMs: number, attempt: number, profile: RetryProfile): number {
+  const multiplier = profile === 'aggressive' ? 1.7 : profile === 'conservative' ? 1.25 : 1.45
+  const base = Math.max(100, backoffMs)
+  const delay = Math.min(30000, Math.round(base * multiplier ** attempt))
+  const jitter = Math.round(delay * 0.12 * Math.random())
+  return delay + jitter
 }
 
 function normalizeUrlLines(raw: string): string[] {
@@ -1593,6 +1754,7 @@ async function parseResponseSseStream(response: Response): Promise<StreamParseRe
         at: new Date().toISOString(),
         type: eventTypeHint || 'message',
         preview: payload.slice(0, 220),
+        raw: payload.slice(0, 6000),
       })
       return
     }
@@ -1617,6 +1779,10 @@ async function parseResponseSseStream(response: Response): Promise<StreamParseRe
         typeof payload === 'string'
           ? payload.slice(0, 220)
           : JSON.stringify(payload).slice(0, 220),
+      raw:
+        typeof payload === 'string'
+          ? payload.slice(0, 6000)
+          : JSON.stringify(payload, null, 2).slice(0, 6000),
     })
 
     addImages(extractImagesFromOutputItemDoneEvent(eventTypeHint, payload))
@@ -2461,6 +2627,8 @@ function App() {
     readStoredObject(RUNTIME_KEY, DEFAULT_RUNTIME_CONFIG),
   )
   const [queueTasks, setQueueTasks] = useState<QueueTask[]>([])
+  const [queuePaused, setQueuePaused] = useState(false)
+  const [queuePriorityMap, setQueuePriorityMap] = useState<Record<string, QueueTaskPriority>>({})
   const [historyFilter, setHistoryFilter] = useState<HistoryFilter>(DEFAULT_HISTORY_FILTER)
   const [historySelection, setHistorySelection] = useState<string[]>([])
   const [historyFolderInput, setHistoryFolderInput] = useState('默认')
@@ -2471,7 +2639,13 @@ function App() {
   )
   const [workspaceNameInput, setWorkspaceNameInput] = useState('')
   const [sseEvents, setSseEvents] = useState<StreamEventTrace[]>([])
+  const [selectedSseEvent, setSelectedSseEvent] = useState<StreamEventTrace | null>(null)
+  const [sseReplayKeyword, setSseReplayKeyword] = useState('')
+  const [sseReplayTypeFilter, setSseReplayTypeFilter] = useState('all')
   const [endpointHealth, setEndpointHealth] = useState<EndpointHealth[]>([])
+  const [endpointCircuits, setEndpointCircuits] = useState<Record<string, EndpointCircuitState>>({})
+  const [errorDiagnostics, setErrorDiagnostics] = useState<ErrorDiagnostic[]>([])
+  const [diagnosticCategoryFilter, setDiagnosticCategoryFilter] = useState<'all' | ErrorCategory>('all')
   const [templateVariablesText, setTemplateVariablesText] = useState('主体=未来城市\n风格=电影感')
   const [templateVersions, setTemplateVersions] = useState<Record<string, string[]>>(() =>
     readTemplateVersionStore(),
@@ -2515,6 +2689,10 @@ function App() {
   const [previewImage, setPreviewImage] = useState<StudioImage | null>(null)
 
   const abortRef = useRef<AbortController | null>(null)
+  const queuePausedRef = useRef(false)
+  const queueResumeResolversRef = useRef<Array<() => void>>([])
+  const queuePriorityRef = useRef<Record<string, QueueTaskPriority>>({})
+  const endpointCircuitsRef = useRef<Record<string, EndpointCircuitState>>({})
   const previewUrlRef = useRef<string>('')
   const hotkeyGenerateRef = useRef<() => Promise<void>>(async () => {})
   const hotkeyCancelRef = useRef<() => void>(() => {})
@@ -2563,6 +2741,14 @@ function App() {
   useEffect(() => {
     safeLocalStorageSet(PUBLISH_KEY, JSON.stringify(publishedImages.slice(0, 200)))
   }, [publishedImages])
+
+  useEffect(() => {
+    queuePriorityRef.current = queuePriorityMap
+  }, [queuePriorityMap])
+
+  useEffect(() => {
+    endpointCircuitsRef.current = endpointCircuits
+  }, [endpointCircuits])
 
   useEffect(() => {
     safeLocalStorageSet(HISTORY_KEY, JSON.stringify(sanitizeHistoryForStorage(history)))
@@ -2790,6 +2976,51 @@ function App() {
       errors24h,
     }
   }, [history])
+
+  const queueStats = useMemo(() => {
+    const total = queueTasks.length
+    const pending = queueTasks.filter((task) => task.status === 'pending').length
+    const running = queueTasks.filter((task) => task.status === 'running').length
+    const success = queueTasks.filter((task) => task.status === 'success').length
+    const error = queueTasks.filter((task) => task.status === 'error').length
+    const cancelled = queueTasks.filter((task) => task.status === 'cancelled').length
+    const finished = success + error + cancelled
+    return {
+      total,
+      pending,
+      running,
+      success,
+      error,
+      cancelled,
+      finished,
+      percent: total > 0 ? Math.round((finished / total) * 100) : 0,
+    }
+  }, [queueTasks])
+
+  const filteredDiagnostics = useMemo(() => {
+    return errorDiagnostics.filter((entry) =>
+      diagnosticCategoryFilter === 'all' ? true : entry.category === diagnosticCategoryFilter,
+    )
+  }, [diagnosticCategoryFilter, errorDiagnostics])
+
+  const sseEventTypeOptions = useMemo(() => {
+    const eventTypes = Array.from(new Set(sseEvents.map((event) => event.type).filter(Boolean)))
+    return ['all', ...eventTypes]
+  }, [sseEvents])
+
+  const filteredSseEvents = useMemo(() => {
+    const keyword = sseReplayKeyword.trim().toLowerCase()
+    return sseEvents.filter((event) => {
+      if (sseReplayTypeFilter !== 'all' && event.type !== sseReplayTypeFilter) {
+        return false
+      }
+      if (!keyword) {
+        return true
+      }
+      const haystack = `${event.type}\n${event.preview}\n${event.raw ?? ''}`.toLowerCase()
+      return haystack.includes(keyword)
+    })
+  }, [sseEvents, sseReplayKeyword, sseReplayTypeFilter])
 
   const filteredHistory = useMemo(() => {
     const keyword = historyFilter.keyword.trim().toLowerCase()
@@ -3280,6 +3511,178 @@ function App() {
     messageApi.success(target === 'en' ? '已转换为英文提示词' : '已转换为中文提示词')
   }
 
+  const addDiagnostic = (input: Omit<ErrorDiagnostic, 'id' | 'at'>) => {
+    setErrorDiagnostics((previous) =>
+      [
+        {
+          id: crypto.randomUUID(),
+          at: new Date().toISOString(),
+          ...input,
+        },
+        ...previous,
+      ].slice(0, 200),
+    )
+  }
+
+  const updateQueueTaskPriority = (taskId: string, priority: QueueTaskPriority) => {
+    setQueuePriorityMap((previous) => ({
+      ...previous,
+      [taskId]: priority,
+    }))
+    setQueueTasks((previous) =>
+      previous.map((task) =>
+        task.id === taskId
+          ? {
+              ...task,
+              priority,
+            }
+          : task,
+      ),
+    )
+  }
+
+  const releaseQueuePauseWaiters = () => {
+    const waiters = queueResumeResolversRef.current.splice(0)
+    waiters.forEach((resolve) => resolve())
+  }
+
+  const handlePauseQueue = () => {
+    if (!isGenerating || queuePausedRef.current) {
+      return
+    }
+    queuePausedRef.current = true
+    setQueuePaused(true)
+    setRunState((previous) =>
+      previous.phase === 'running'
+        ? {
+            ...previous,
+            message: `${previous.message}（队列已暂停）`,
+          }
+        : previous,
+    )
+    addAuditLog('queue.pause', '手动暂停队列调度')
+  }
+
+  const handleResumeQueue = () => {
+    if (!queuePausedRef.current) {
+      return
+    }
+    queuePausedRef.current = false
+    setQueuePaused(false)
+    releaseQueuePauseWaiters()
+    addAuditLog('queue.resume', '恢复队列调度')
+  }
+
+  const waitForQueueResume = async (signal: AbortSignal) => {
+    if (!queuePausedRef.current) {
+      return
+    }
+
+    await new Promise<void>((resolve, reject) => {
+      const onAbort = () => {
+        signal.removeEventListener('abort', onAbort)
+        reject(new DOMException('Aborted', 'AbortError'))
+      }
+
+      const release = () => {
+        signal.removeEventListener('abort', onAbort)
+        resolve()
+      }
+
+      queueResumeResolversRef.current.push(release)
+      signal.addEventListener('abort', onAbort, { once: true })
+    })
+  }
+
+  const markEndpointFailure = (
+    baseCandidate: string,
+    statusCode: number | undefined,
+    messageText: string,
+  ) => {
+    if (!runtimeConfig.circuitBreakerEnabled) {
+      return
+    }
+    const key = baseCandidate.trim()
+    if (!key) {
+      return
+    }
+    const nowMs = Date.now()
+    const previous = endpointCircuitsRef.current[key] ?? {
+      url: key,
+      failures: 0,
+      trips: 0,
+      openedUntil: 0,
+      updatedAt: new Date().toISOString(),
+    }
+    const nextFailures = previous.failures + 1
+    const shouldTrip = nextFailures >= runtimeConfig.circuitBreakerFailureThreshold
+    const openedUntil = shouldTrip
+      ? nowMs + Math.max(10, runtimeConfig.circuitBreakerCooldownSec) * 1000
+      : previous.openedUntil
+    const next: EndpointCircuitState = {
+      ...previous,
+      failures: shouldTrip ? 0 : nextFailures,
+      trips: shouldTrip ? previous.trips + 1 : previous.trips,
+      openedUntil,
+      lastStatusCode: statusCode,
+      lastError: messageText.slice(0, 180),
+      updatedAt: new Date().toISOString(),
+    }
+    const merged = {
+      ...endpointCircuitsRef.current,
+      [key]: next,
+    }
+    endpointCircuitsRef.current = merged
+    setEndpointCircuits(merged)
+    if (shouldTrip) {
+      addAuditLog(
+        'endpoint.circuit.open',
+        `${key} 熔断 ${runtimeConfig.circuitBreakerCooldownSec}s，原因：${messageText.slice(0, 80)}`,
+      )
+    }
+  }
+
+  const markEndpointSuccess = (baseCandidate: string) => {
+    if (!runtimeConfig.circuitBreakerEnabled) {
+      return
+    }
+    const key = baseCandidate.trim()
+    if (!key) {
+      return
+    }
+    const previous = endpointCircuitsRef.current[key]
+    if (!previous) {
+      return
+    }
+    const next: EndpointCircuitState = {
+      ...previous,
+      failures: 0,
+      openedUntil: 0,
+      updatedAt: new Date().toISOString(),
+    }
+    const merged = {
+      ...endpointCircuitsRef.current,
+      [key]: next,
+    }
+    endpointCircuitsRef.current = merged
+    setEndpointCircuits(merged)
+  }
+
+  const isEndpointCircuitOpen = (baseCandidate: string): boolean => {
+    if (!runtimeConfig.circuitBreakerEnabled) {
+      return false
+    }
+    const key = baseCandidate.trim()
+    if (!key) {
+      return false
+    }
+    const entry = endpointCircuitsRef.current[key]
+    if (!entry) {
+      return false
+    }
+    return entry.openedUntil > Date.now()
+  }
+
   const pushWebhookEvent = async (eventName: string, payload: Record<string, unknown>) => {
     const webhookUrl = runtimeConfig.webhookUrl.trim()
     if (!webhookUrl) {
@@ -3527,6 +3930,9 @@ function App() {
       return
     }
     abortRef.current.abort()
+    queuePausedRef.current = false
+    setQueuePaused(false)
+    releaseQueuePauseWaiters()
   }
 
   const appendHistory = (entry: HistoryRecord) => {
@@ -3665,13 +4071,22 @@ function App() {
         id: job.id,
         prompt: job.prompt,
         status: 'pending',
+        priority: 'normal',
         model: '',
         endpoint: '',
         message: job.seedLabel,
       })),
     )
+    const initialPriorityMap = Object.fromEntries(
+      jobs.map((job) => [job.id, 'normal' as QueueTaskPriority]),
+    )
+    setQueuePriorityMap(initialPriorityMap)
+    queuePriorityRef.current = initialPriorityMap
 
     setIsGenerating(true)
+    queuePausedRef.current = false
+    setQueuePaused(false)
+    releaseQueuePauseWaiters()
     setRunState({
       phase: 'running',
       message: '任务已提交，正在等待模型生成图像',
@@ -3680,6 +4095,7 @@ function App() {
     setResponseText('')
     setRawResponse('')
     setSseEvents([])
+    setSelectedSseEvent(null)
 
     const controller = new AbortController()
     abortRef.current = controller
@@ -3696,14 +4112,50 @@ function App() {
     addAuditLog('generation.start', `开始生成任务 ${jobs.length} 条`)
 
     try {
-      for (let taskIndex = 0; taskIndex < jobs.length; taskIndex += 1) {
-        const job = jobs[taskIndex]
+      const jobById = new Map(jobs.map((job) => [job.id, job]))
+      const jobIndexMap = new Map(jobs.map((job, index) => [job.id, index]))
+      const pendingJobIds = jobs.map((job) => job.id)
+      const effectiveConcurrency =
+        runtimeConfig.dependencyChainEnabled && mode === 'image-to-image'
+          ? 1
+          : Math.max(1, Math.min(runtimeConfig.maxConcurrency, jobs.length))
+
+      const pickNextJob = (): GenerationJob | null => {
+        if (pendingJobIds.length === 0) {
+          return null
+        }
+        pendingJobIds.sort((a, b) => {
+          const priorityA = queuePriorityRef.current[a] ?? 'normal'
+          const priorityB = queuePriorityRef.current[b] ?? 'normal'
+          const scoreA = QUEUE_PRIORITY_WEIGHT[priorityA]
+          const scoreB = QUEUE_PRIORITY_WEIGHT[priorityB]
+          if (scoreA !== scoreB) {
+            return scoreB - scoreA
+          }
+          return (jobIndexMap.get(a) ?? 0) - (jobIndexMap.get(b) ?? 0)
+        })
+        const nextId = pendingJobIds.shift()
+        if (!nextId) {
+          return null
+        }
+        return jobById.get(nextId) ?? null
+      }
+
+      const executeJob = async (job: GenerationJob) => {
+        if (controller.signal.aborted) {
+          throw new DOMException('Aborted', 'AbortError')
+        }
+
         const taskPrompt = job.prompt
         attemptedPrompt = taskPrompt
+        const taskIndex = (jobIndexMap.get(job.id) ?? 0) + 1
         const modelCandidates = buildModelCandidates(connection.provider, connection.model)
         let taskSucceeded = false
         let taskFailureMessage = ''
         let taskFailureEndpoint = ''
+        let taskFailureStatusCode: number | undefined
+        let taskAttemptCount = 0
+        let taskRetryCount = 0
 
         setQueueTasks((previous) =>
           previous.map((item) =>
@@ -3712,6 +4164,8 @@ function App() {
                   ...item,
                   status: 'running',
                   startedAt: performance.now(),
+                  attempts: 0,
+                  retryCount: 0,
                 }
               : item,
           ),
@@ -3722,6 +4176,21 @@ function App() {
           attemptedModel = candidateModel
           for (let baseIndex = 0; baseIndex < baseCandidates.length; baseIndex += 1) {
             const baseCandidate = baseCandidates[baseIndex]
+            if (isEndpointCircuitOpen(baseCandidate)) {
+              const circuitState = endpointCircuitsRef.current[baseCandidate.trim()]
+              const remainSec =
+                circuitState && circuitState.openedUntil > Date.now()
+                  ? Math.max(1, Math.ceil((circuitState.openedUntil - Date.now()) / 1000))
+                  : runtimeConfig.circuitBreakerCooldownSec
+              taskFailureMessage = `线路熔断中：${baseCandidate}（预计 ${remainSec}s 后恢复）`
+              continue
+            }
+
+            await waitForQueueResume(controller.signal)
+            if (controller.signal.aborted) {
+              throw new DOMException('Aborted', 'AbortError')
+            }
+
             const attemptStartedAt = performance.now()
             try {
               const request = await prepareRequest(
@@ -3743,7 +4212,7 @@ function App() {
               setRunState({
                 phase: 'running',
                 message: isBatchRun
-                  ? `队列 ${taskIndex + 1}/${jobs.length} · ${job.seedLabel} · ${candidateModel}`
+                  ? `队列 ${taskIndex}/${jobs.length} · ${job.seedLabel} · ${candidateModel}`
                   : modelCandidates.length > 1
                     ? `正在尝试模型 ${candidateModel}（${modelIndex + 1}/${modelCandidates.length}）`
                     : '任务已提交，正在等待模型生成图像',
@@ -3764,29 +4233,91 @@ function App() {
               let response: Response | null = null
               let retryError = ''
               for (let retryIndex = 0; retryIndex <= runtimeConfig.maxRetries; retryIndex += 1) {
+                await waitForQueueResume(controller.signal)
+                if (controller.signal.aborted) {
+                  throw new DOMException('Aborted', 'AbortError')
+                }
+                taskAttemptCount += 1
+                setQueueTasks((previous) =>
+                  previous.map((item) =>
+                    item.id === job.id
+                      ? {
+                          ...item,
+                          attempts: taskAttemptCount,
+                          retryCount: taskRetryCount,
+                        }
+                      : item,
+                  ),
+                )
+
                 try {
                   const candidateResponse = await fetch(request.endpoint, {
                     ...request.init,
                     signal: controller.signal,
                   })
+
+                  const statusRetry = shouldRetryByProfile(
+                    candidateResponse.status,
+                    `HTTP ${candidateResponse.status}`,
+                    retryIndex,
+                    runtimeConfig.maxRetries,
+                    runtimeConfig.retryProfile,
+                  )
+                  if (statusRetry) {
+                    taskRetryCount += 1
+                    await sleep(
+                      computeRetryDelayMs(
+                        runtimeConfig.retryBackoffMs,
+                        retryIndex + 1,
+                        runtimeConfig.retryProfile,
+                      ),
+                    )
+                    continue
+                  }
                   response = candidateResponse
-                  if (candidateResponse.status >= 500 && retryIndex < runtimeConfig.maxRetries) {
-                    await sleep(runtimeConfig.retryBackoffMs * (retryIndex + 1))
+                  break
+                } catch (error) {
+                  if (error instanceof DOMException && error.name === 'AbortError') {
+                    throw error
+                  }
+                  retryError = error instanceof Error ? error.message : 'network error'
+                  const networkRetry = shouldRetryByProfile(
+                    undefined,
+                    retryError,
+                    retryIndex,
+                    runtimeConfig.maxRetries,
+                    runtimeConfig.retryProfile,
+                  )
+                  if (networkRetry) {
+                    taskRetryCount += 1
+                    await sleep(
+                      computeRetryDelayMs(
+                        runtimeConfig.retryBackoffMs,
+                        retryIndex + 1,
+                        runtimeConfig.retryProfile,
+                      ),
+                    )
                     continue
                   }
                   break
-                } catch (error) {
-                  retryError = error instanceof Error ? error.message : 'network error'
-                  if (retryIndex < runtimeConfig.maxRetries) {
-                    await sleep(runtimeConfig.retryBackoffMs * (retryIndex + 1))
-                    continue
-                  }
                 }
               }
+
               if (!response) {
-                taskFailureMessage = `请求失败（重试后仍失败）：${retryError}`
+                markEndpointFailure(baseCandidate, undefined, retryError || 'network error')
+                const classified = classifyFailure(undefined, retryError || 'network error')
+                addDiagnostic({
+                  category: classified.category,
+                  summary: `请求失败（无响应）：${retryError || 'network error'}`,
+                  suggestion: classified.suggestion,
+                  endpoint: taskFailureEndpoint,
+                  model: candidateModel,
+                  retryable: classified.retryable,
+                })
+                taskFailureMessage = `请求失败（重试后仍失败）：${retryError || 'network error'}`
                 continue
               }
+
               lastStatusCode = response.status
               lastAttemptLatencyMs = Math.round(performance.now() - attemptStartedAt)
               const responseContentType = (response.headers.get('content-type') ?? '').toLowerCase()
@@ -3802,6 +4333,8 @@ function App() {
                   typeof payload === 'string' ? payload : JSON.stringify(payload, null, 2),
                 )
                 const failure = extractError(payload, response.status)
+                taskFailureStatusCode = response.status
+
                 if (
                   MODEL_UNAVAILABLE_PATTERN.test(failure) &&
                   modelIndex < modelCandidates.length - 1
@@ -3812,13 +4345,26 @@ function App() {
                   )
                   break
                 }
+
+                const classified = classifyFailure(response.status, failure)
+                addDiagnostic({
+                  category: classified.category,
+                  summary: failure,
+                  suggestion: classified.suggestion,
+                  endpoint: request.endpoint,
+                  model: candidateModel,
+                  statusCode: response.status,
+                  retryable: classified.retryable,
+                })
+                markEndpointFailure(baseCandidate, response.status, failure)
+
                 taskFailureMessage =
                   mode === 'image-to-image' &&
                   Boolean(source.file) &&
                   INPUT_STREAM_ERROR_PATTERN.test(failure)
                     ? `图生图输入流异常：${failure}。已自动做上传图规范化，若仍失败请改用外链图片 URL 或更小的 JPG/PNG。`
                     : failure
-                if (response.status >= 500 || isLikelyFetchNetworkError(failure)) {
+                if (classified.retryable) {
                   continue
                 }
                 break
@@ -3837,7 +4383,7 @@ function App() {
                 raw = streamResult.raw
                 streamEventTypes = streamResult.eventTypes
                 streamHasOutputItemDone = streamResult.hasOutputItemDone
-                setSseEvents((previous) => [...previous, ...streamResult.events].slice(-800))
+                setSseEvents((previous) => [...previous, ...streamResult.events].slice(-1600))
                 setRawResponse(raw || 'SSE 流式响应已消费，但无可展示原文。')
               } else {
                 raw = await response.text()
@@ -3850,29 +4396,39 @@ function App() {
               }
 
               if (nextImages.length === 0) {
-                if (shouldParseSse) {
-                  const recentEventTypes =
-                    streamEventTypes.length > 0
-                      ? streamEventTypes.slice(0, 10).join(', ')
-                      : '未解析到事件类型'
-                  taskFailureMessage = streamHasOutputItemDone
+                const recentEventTypes =
+                  streamEventTypes.length > 0
+                    ? streamEventTypes.slice(0, 10).join(', ')
+                    : '未解析到事件类型'
+                taskFailureMessage = shouldParseSse
+                  ? streamHasOutputItemDone
                     ? `接口返回成功，检测到 response.output_item.done，但事件中未提取到可用图片数据（item.result 可能为空）。事件类型：${recentEventTypes}`
                     : `接口返回成功，但未检测到 response.output_item.done。事件类型：${recentEventTypes}；content-type: ${
                         responseContentType || 'unknown'
                       }`
-                } else {
-                  taskFailureMessage =
-                    '接口返回成功，但未识别到图片数据。请检查 SSE 事件中是否包含 response.output_item.done。'
-                }
+                  : '接口返回成功，但未识别到图片数据。请检查 SSE 事件中是否包含 response.output_item.done。'
+
+                const classified = classifyFailure(response.status, taskFailureMessage)
+                addDiagnostic({
+                  category: classified.category,
+                  summary: taskFailureMessage,
+                  suggestion: classified.suggestion,
+                  endpoint: request.endpoint,
+                  model: candidateModel,
+                  statusCode: response.status,
+                  retryable: true,
+                })
+                markEndpointFailure(baseCandidate, response.status, taskFailureMessage)
                 continue
               }
 
+              markEndpointSuccess(baseCandidate)
               aggregatedImages.push(...nextImages)
               setImages([...aggregatedImages])
-              const summaryLine = outputText || `第 ${taskIndex + 1} 条任务生成成功。`
+              const summaryLine = outputText || `第 ${taskIndex} 条任务生成成功。`
               textualSummaries.push(
                 isBatchRun
-                  ? `[${taskIndex + 1}/${jobs.length}] ${summaryLine}`
+                  ? `[${taskIndex}/${jobs.length}] ${summaryLine}`
                   : summaryLine,
               )
               setResponseText(textualSummaries.slice(-8).join('\n\n'))
@@ -3942,6 +4498,8 @@ function App() {
                         status: 'success',
                         finishedAt: performance.now(),
                         latencyMs: lastAttemptLatencyMs,
+                        attempts: taskAttemptCount,
+                        retryCount: taskRetryCount,
                         message: summaryLine,
                       }
                     : item,
@@ -3962,8 +4520,13 @@ function App() {
               taskSucceeded = true
               break
             } catch (error) {
+              if (error instanceof DOMException && error.name === 'AbortError') {
+                throw error
+              }
               const reason = error instanceof Error ? error.message : '未知异常'
               taskFailureMessage = reason
+              taskFailureStatusCode = undefined
+              markEndpointFailure(baseCandidate, undefined, reason)
               if (isLikelyFetchNetworkError(reason) || INPUT_STREAM_ERROR_PATTERN.test(reason)) {
                 continue
               }
@@ -3975,6 +4538,16 @@ function App() {
         }
 
         if (!taskSucceeded) {
+          const classified = classifyFailure(taskFailureStatusCode, taskFailureMessage || '执行失败')
+          addDiagnostic({
+            category: classified.category,
+            summary: taskFailureMessage || '执行失败',
+            suggestion: classified.suggestion,
+            endpoint: taskFailureEndpoint,
+            model: attemptedModel,
+            statusCode: taskFailureStatusCode,
+            retryable: classified.retryable,
+          })
           setQueueTasks((previous) =>
             previous.map((item) =>
               item.id === job.id
@@ -3982,23 +4555,42 @@ function App() {
                     ...item,
                     status: 'error',
                     finishedAt: performance.now(),
+                    attempts: taskAttemptCount,
+                    retryCount: taskRetryCount,
+                    lastErrorCategory: classified.category,
                     message: taskFailureMessage || '执行失败',
                     endpoint: taskFailureEndpoint,
                   }
                 : item,
             ),
           )
-          throw new Error(taskFailureMessage || `批量第 ${taskIndex + 1} 条生成失败`)
-        }
-
-        if (runtimeConfig.requestIntervalMs > 0 && taskIndex < jobs.length - 1) {
-          const effectiveInterval = Math.max(
-            0,
-            Math.floor(runtimeConfig.requestIntervalMs / Math.max(1, runtimeConfig.maxConcurrency)),
-          )
-          await sleep(effectiveInterval)
+          throw new Error(taskFailureMessage || `批量第 ${taskIndex} 条生成失败`)
         }
       }
+
+      const workerCount = Math.max(1, Math.min(effectiveConcurrency, jobs.length))
+      const workers = Array.from({ length: workerCount }, async () => {
+        while (true) {
+          await waitForQueueResume(controller.signal)
+          if (controller.signal.aborted) {
+            throw new DOMException('Aborted', 'AbortError')
+          }
+          const nextJob = pickNextJob()
+          if (!nextJob) {
+            return
+          }
+          await executeJob(nextJob)
+          if (runtimeConfig.requestIntervalMs > 0 && pendingJobIds.length > 0) {
+            const effectiveInterval = Math.max(
+              0,
+              Math.floor(runtimeConfig.requestIntervalMs / Math.max(1, workerCount)),
+            )
+            await sleep(effectiveInterval)
+          }
+        }
+      })
+
+      await Promise.all(workers)
 
       const totalLatencyMs = Math.round(performance.now() - batchStartedAt)
       setRunState({
@@ -4050,13 +4642,24 @@ function App() {
           item.status === 'pending' || item.status === 'running'
             ? {
                 ...item,
-                status: 'error',
+                status: isAbortError ? 'cancelled' : 'error',
                 message: readableMessage,
                 finishedAt: performance.now(),
               }
             : item,
         ),
       )
+
+      const classified = classifyFailure(lastStatusCode, readableMessage)
+      addDiagnostic({
+        category: classified.category,
+        summary: readableMessage,
+        suggestion: classified.suggestion,
+        endpoint: attemptedEndpoint,
+        model: attemptedModel,
+        statusCode: lastStatusCode,
+        retryable: classified.retryable,
+      })
 
       appendHistory({
         id: crypto.randomUUID(),
@@ -4084,6 +4687,9 @@ function App() {
       messageApi.error(readableMessage)
     } finally {
       setIsGenerating(false)
+      queuePausedRef.current = false
+      setQueuePaused(false)
+      releaseQueuePauseWaiters()
       abortRef.current = null
     }
   }
@@ -5654,6 +6260,25 @@ function App() {
               </div>
 
               <div className="field-block">
+                <Text className="field-label">重试策略</Text>
+                <Select
+                  value={runtimeConfig.retryProfile}
+                  options={[
+                    { value: 'conservative', label: '保守（仅网络/5xx/429）' },
+                    { value: 'balanced', label: '平衡（默认）' },
+                    { value: 'aggressive', label: '激进（可重试错误都重试）' },
+                  ]}
+                  onChange={(value) =>
+                    setRuntimeConfig((previous) => ({
+                      ...previous,
+                      retryProfile:
+                        value === 'conservative' || value === 'aggressive' ? value : 'balanced',
+                    }))
+                  }
+                />
+              </div>
+
+              <div className="field-block">
                 <Text className="field-label">失败重试次数</Text>
                 <InputNumber
                   min={0}
@@ -5679,6 +6304,40 @@ function App() {
                     setRuntimeConfig((previous) => ({
                       ...previous,
                       retryBackoffMs: Math.max(100, Math.floor(Number(value ?? 100))),
+                    }))
+                  }
+                  style={{ width: '100%' }}
+                />
+              </div>
+              <div className="field-block">
+                <Text className="field-label">熔断阈值（连续失败）</Text>
+                <InputNumber
+                  min={1}
+                  max={10}
+                  value={runtimeConfig.circuitBreakerFailureThreshold}
+                  onChange={(value) =>
+                    setRuntimeConfig((previous) => ({
+                      ...previous,
+                      circuitBreakerFailureThreshold: Math.max(
+                        1,
+                        Math.min(10, Math.floor(Number(value ?? 3))),
+                      ),
+                    }))
+                  }
+                  style={{ width: '100%' }}
+                />
+              </div>
+              <div className="field-block">
+                <Text className="field-label">熔断冷却秒数</Text>
+                <InputNumber
+                  min={10}
+                  max={600}
+                  step={10}
+                  value={runtimeConfig.circuitBreakerCooldownSec}
+                  onChange={(value) =>
+                    setRuntimeConfig((previous) => ({
+                      ...previous,
+                      circuitBreakerCooldownSec: Math.max(10, Math.floor(Number(value ?? 60))),
                     }))
                   }
                   style={{ width: '100%' }}
@@ -5722,6 +6381,17 @@ function App() {
                     }
                   >
                     自动选择最优线路
+                  </Checkbox>
+                  <Checkbox
+                    checked={runtimeConfig.circuitBreakerEnabled}
+                    onChange={(event) =>
+                      setRuntimeConfig((previous) => ({
+                        ...previous,
+                        circuitBreakerEnabled: event.target.checked,
+                      }))
+                    }
+                  >
+                    启用端点熔断
                   </Checkbox>
                   <Checkbox
                     checked={runtimeConfig.similarityDedupeEnabled}
@@ -5884,7 +6554,32 @@ function App() {
                 任务队列
               </Space>
             }
+            extra={
+              <Space>
+                <Tag color={queuePaused ? 'orange' : 'green'}>
+                  {queuePaused ? '已暂停' : '运行中'}
+                </Tag>
+                <Tag>并发 x{Math.max(1, runtimeConfig.maxConcurrency)}</Tag>
+                <Button size="small" onClick={handlePauseQueue} disabled={!isGenerating || queuePaused}>
+                  暂停队列
+                </Button>
+                <Button size="small" onClick={handleResumeQueue} disabled={!isGenerating || !queuePaused}>
+                  恢复队列
+                </Button>
+              </Space>
+            }
           >
+            <div className="queue-summary-row">
+              <Space wrap>
+                <Tag>总数 {queueStats.total}</Tag>
+                <Tag color="processing">运行 {queueStats.running}</Tag>
+                <Tag color="default">排队 {queueStats.pending}</Tag>
+                <Tag color="success">成功 {queueStats.success}</Tag>
+                <Tag color="error">失败 {queueStats.error}</Tag>
+                {queueStats.cancelled > 0 ? <Tag color="default">取消 {queueStats.cancelled}</Tag> : null}
+              </Space>
+              <Progress percent={queueStats.percent} size="small" showInfo={false} />
+            </div>
             {queueTasks.length === 0 ? (
               <Empty
                 description="暂无队列任务，发起批量任务后将在这里看到进度。"
@@ -5896,11 +6591,40 @@ function App() {
                   <div key={task.id} className={`queue-item queue-${task.status}`}>
                     <div className="queue-item-head">
                       <Text strong>
-                        #{index + 1} {task.status === 'success' ? '已完成' : task.status === 'error' ? '失败' : task.status === 'running' ? '执行中' : '排队中'}
+                        #{index + 1}{' '}
+                        {task.status === 'success'
+                          ? '已完成'
+                          : task.status === 'error'
+                            ? '失败'
+                            : task.status === 'cancelled'
+                              ? '已取消'
+                              : task.status === 'running'
+                                ? '执行中'
+                                : '排队中'}
                       </Text>
                       <Space size={6}>
+                        <Select
+                          size="small"
+                          value={task.priority}
+                          style={{ width: 86 }}
+                          options={[
+                            { value: 'high', label: '高优先' },
+                            { value: 'normal', label: '普通' },
+                            { value: 'low', label: '低优先' },
+                          ]}
+                          disabled={task.status !== 'pending'}
+                          onChange={(value) =>
+                            updateQueueTaskPriority(
+                              task.id,
+                              value === 'high' || value === 'low' ? value : 'normal',
+                            )
+                          }
+                        />
                         {task.model ? <Tag>{task.model}</Tag> : null}
                         {typeof task.latencyMs === 'number' ? <Tag>{task.latencyMs} ms</Tag> : null}
+                        {typeof task.retryCount === 'number' && task.retryCount > 0 ? (
+                          <Tag color="orange">重试 {task.retryCount}</Tag>
+                        ) : null}
                       </Space>
                     </div>
                     <Paragraph ellipsis={{ rows: 1 }} className="queue-prompt">
@@ -5987,6 +6711,13 @@ function App() {
                       <Tag color={item.ok ? 'green' : 'red'}>{item.ok ? '可用' : '异常'}</Tag>
                       <Tag>{item.latencyMs}ms</Tag>
                       <Tag>{item.statusCode || 'ERR'}</Tag>
+                      {endpointCircuits[item.url]?.openedUntil > Date.now() ? (
+                        <Tag color="orange">
+                          熔断中 {Math.max(1, Math.ceil((endpointCircuits[item.url].openedUntil - Date.now()) / 1000))}s
+                        </Tag>
+                      ) : endpointCircuits[item.url]?.trips ? (
+                        <Tag>熔断次数 {endpointCircuits[item.url].trips}</Tag>
+                      ) : null}
                       <Text code>{item.url}</Text>
                     </Space>
                     <Text type="secondary">{new Date(item.checkedAt).toLocaleTimeString()}</Text>
@@ -6009,6 +6740,73 @@ function App() {
                 </div>
               ))}
             </div>
+          </Card>
+
+          <Card
+            className="studio-card"
+            title={
+              <Space>
+                <ThunderboltOutlined />
+                错误诊断中心
+              </Space>
+            }
+            extra={
+              <Space>
+                <Select
+                  size="small"
+                  value={diagnosticCategoryFilter}
+                  style={{ width: 150 }}
+                  options={[
+                    { value: 'all', label: '全部分类' },
+                    { value: 'network', label: '网络' },
+                    { value: 'auth', label: '鉴权' },
+                    { value: 'quota', label: '额度' },
+                    { value: 'server', label: '服务端' },
+                    { value: 'sse', label: 'SSE' },
+                    { value: 'model', label: '模型' },
+                    { value: 'client', label: '请求参数' },
+                    { value: 'unknown', label: '未知' },
+                  ]}
+                  onChange={(value) =>
+                    setDiagnosticCategoryFilter(
+                      value === 'all' ||
+                        value === 'network' ||
+                        value === 'auth' ||
+                        value === 'quota' ||
+                        value === 'server' ||
+                        value === 'sse' ||
+                        value === 'model' ||
+                        value === 'client' ||
+                        value === 'unknown'
+                        ? value
+                        : 'all',
+                    )
+                  }
+                />
+                <Button size="small" onClick={() => setErrorDiagnostics([])} disabled={errorDiagnostics.length === 0}>
+                  清空
+                </Button>
+              </Space>
+            }
+          >
+            {filteredDiagnostics.length === 0 ? (
+              <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="暂无诊断记录" />
+            ) : (
+              <div className="diagnostic-list">
+                {filteredDiagnostics.slice(0, 80).map((entry) => (
+                  <div key={entry.id} className="diagnostic-item">
+                    <Space wrap size={6}>
+                      <Tag color={entry.retryable ? 'orange' : 'default'}>{entry.category}</Tag>
+                      {entry.statusCode ? <Tag>HTTP {entry.statusCode}</Tag> : null}
+                      <Text type="secondary">{new Date(entry.at).toLocaleTimeString()}</Text>
+                    </Space>
+                    <Text strong>{entry.summary}</Text>
+                    <Text type="secondary">{entry.suggestion}</Text>
+                    <Text code>{entry.endpoint || 'unknown endpoint'}</Text>
+                  </div>
+                ))}
+              </div>
+            )}
           </Card>
 
           <Card
@@ -6512,14 +7310,53 @@ function App() {
                       image={Empty.PRESENTED_IMAGE_SIMPLE}
                     />
                   ) : (
-                    <div className="sse-timeline">
-                      {sseEvents.slice(-120).map((event, index) => (
-                        <div key={`${event.at}-${index}`} className="sse-item">
-                          <Text type="secondary">{new Date(event.at).toLocaleTimeString()}</Text>
-                          <Tag>{event.type}</Tag>
-                          <Paragraph ellipsis={{ rows: 2 }}>{event.preview}</Paragraph>
-                        </div>
-                      ))}
+                    <div className="sse-replay">
+                      <div className="sse-replay-toolbar">
+                        <Select
+                          size="small"
+                          value={sseReplayTypeFilter}
+                          style={{ width: 180 }}
+                          options={sseEventTypeOptions.map((type) => ({
+                            value: type,
+                            label: type === 'all' ? '全部事件' : type,
+                          }))}
+                          onChange={(value) => setSseReplayTypeFilter(value)}
+                        />
+                        <Input
+                          size="small"
+                          allowClear
+                          value={sseReplayKeyword}
+                          onChange={(event) => setSseReplayKeyword(event.target.value)}
+                          placeholder="搜索事件内容"
+                        />
+                        <Button size="small" onClick={() => setSseEvents([])}>
+                          清空事件
+                        </Button>
+                      </div>
+                      <div className="sse-timeline">
+                        {filteredSseEvents.slice(-200).map((event, index) => (
+                          <div key={`${event.at}-${index}`} className="sse-item">
+                            <Space wrap size={6}>
+                              <Text type="secondary">{new Date(event.at).toLocaleTimeString()}</Text>
+                              <Tag>{event.type}</Tag>
+                              <Button size="small" onClick={() => setSelectedSseEvent(event)}>
+                                查看原文
+                              </Button>
+                            </Space>
+                            <Paragraph ellipsis={{ rows: 2 }}>{event.preview}</Paragraph>
+                          </div>
+                        ))}
+                      </div>
+                      {selectedSseEvent ? (
+                        <Input.TextArea
+                          className="mono-area"
+                          value={selectedSseEvent.raw || selectedSseEvent.preview}
+                          readOnly
+                          autoSize={{ minRows: 6, maxRows: 14 }}
+                        />
+                      ) : (
+                        <Text type="secondary">点击“查看原文”可回放完整事件内容。</Text>
+                      )}
                     </div>
                   ),
                 },
